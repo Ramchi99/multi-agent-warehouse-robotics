@@ -97,6 +97,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         self.robot_radius = 0.8         # Buffer size (robot width/2 + margin)
         self.connection_radius = 10.0   # Max length of an edge
         self.min_sample_dist = 0.3      # Minimum distance between nodes
+        self.turn_penalty = 0.0         # Heuristic cost for "stopping and turning" (meters equivalent)
 
     def send_plan(self, init_sim_obs: InitSimGlobalObservations) -> str:
         # --- 1. EXTRACT OBSTACLES & BOUNDS (Done once) ---
@@ -113,13 +114,10 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         if obs_polygons:
             raw_combined = unary_union(obs_polygons)
             bounds = raw_combined.bounds 
-            # Optional: Add margin to bounds
-            # bounds = (bounds[0]-2, bounds[1]-2, bounds[2]+2, bounds[3]+2)
         else:
             bounds = (-12.0, -12.0, 12.0, 12.0)
         
         # --- 2. PREPARE NODES (Iterate once) ---
-        # We build two structures simultaneously to avoid double looping
         special_nodes_plot = {"starts": [], "goals": [], "collections": []}
         initial_nodes_data = [] # List of (x, y, type, label)
 
@@ -145,25 +143,143 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                     initial_nodes_data.append((c.x, c.y, "collection", cid))
 
         # --- 3. BUILD PRM ---
-        # Optimization: removed 'obs_polygons' from arguments. 
-        # The builder only needs bounds and inflated obstacles.
         G = self._build_prm(inflated_obstacles, initial_nodes_data, bounds)
 
-        # --- 4. DEBUG PLOT ---
+        # # --- 4. COMPUTE COST MATRIX & SAMPLE PATH ---
+        # cost_matrix, debug_path = self._compute_cost_matrix(G)
+        # print(f"Computed Cost Matrix for {len(cost_matrix)} POIs")
+
+        # --- 4. COMPUTE ROUTING DATA (COSTS & PATHS) ---
+        # Returns cost matrix AND a structured dictionary of paths for plotting
+        cost_matrix, path_data = self._compute_routing_data(G)
+        
+        # Example: Print a snippet of the cost matrix
+        print(f"Computed Cost Matrix for {len(cost_matrix)} nodes.")
+
+        # --- 5. DEBUG PLOT ---
         out_dir = Path("out/ex14/debug_plots")
         out_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = out_dir / f"prm_debug_{timestamp}.png"
         
-        self._plot_prm(G, obs_polygons, special_nodes_plot, str(filename), bounds)
+        self._plot_prm(G, obs_polygons, special_nodes_plot, str(filename), bounds, path_data) #debug_path)
 
-        # --- 5. RETURN EMPTY PLANS ---
-        # TODO: Run A* on graph G here
+        # --- 6. RETURN EMPTY PLANS ---
         planned_paths = {p: [] for p in init_sim_obs.players_obs.keys()}
         global_plan_message = GlobalPlanMessage(
             paths=planned_paths
         )
         return global_plan_message.model_dump_json(round_trip=True)
+
+    # def _compute_cost_matrix(self, G):
+    #     """
+    #     Computes APSP for POIs and returns matrix + one debug path.
+    #     """
+    #     poi_indices = []
+    #     starts = []
+    #     goals = []
+        
+    #     for n, data in G.nodes(data=True):
+    #         if data.get('type') in ['start', 'goal', 'collection']:
+    #             poi_indices.append(n)
+    #             if data.get('type') == 'start': starts.append(n)
+    #             if data.get('type') == 'goal': goals.append(n)
+        
+    #     matrix = {}
+    #     debug_path = []
+        
+    #     # Calculate Matrix
+    #     for source in poi_indices:
+    #         matrix[source] = {}
+    #         try:
+    #             lengths = nx.single_source_dijkstra_path_length(G, source, weight='weight')
+    #             for target in poi_indices:
+    #                 matrix[source][target] = lengths.get(target, float('inf'))
+    #         except Exception:
+    #             pass
+
+    #     # Calculate One Debug Path (Start[0] -> Goal[0])
+    #     if starts and goals:
+    #         try:
+    #             # Use dijkstra_path to get the actual nodes
+    #             path_nodes = nx.dijkstra_path(G, starts[0], goals[0], weight='weight')
+    #             pos = nx.get_node_attributes(G, 'pos')
+    #             debug_path = [pos[n] for n in path_nodes]
+    #         except nx.NetworkXNoPath:
+    #             pass
+                
+    #     return matrix, debug_path
+
+    def _compute_routing_data(self, G) -> Tuple[dict, dict]:
+        """
+        Computes APSP for POIs and extracts ALL paths.
+        Returns:
+            1. cost_matrix: {SourceLabel: {TargetLabel: Cost}}
+            2. path_data: {
+                   "starts": {SourceLabel: {TargetLabel: {'coords': [...], 'is_best': bool}}},
+                   "goals":  {SourceLabel: {TargetLabel: {'coords': [...], 'is_best': bool}}}
+               }
+        """
+        cost_matrix = {}
+        
+        # Structure to hold paths for plotting: 
+        # path_data['starts']['Robot1']['Goal_A'] = coords...
+        path_data = {"starts": {}, "goals": {}}
+        
+        pos = nx.get_node_attributes(G, 'pos')
+        
+        # 1. Group Nodes
+        # We need indices to run Dijkstra, labels for the dict keys
+        starts = [(n, d.get('label')) for n, d in G.nodes(data=True) if d.get('type') == 'start']
+        goals = [(n, d.get('label')) for n, d in G.nodes(data=True) if d.get('type') == 'goal']
+        collections = [(n, d.get('label')) for n, d in G.nodes(data=True) if d.get('type') == 'collection']
+
+        # Helper to process a group (e.g., All Starts -> All Goals)
+        def process_group(source_list, target_list, category_key):
+            for src_idx, src_label in source_list:
+                if src_label not in cost_matrix: cost_matrix[src_label] = {}
+                if src_label not in path_data[category_key]: path_data[category_key][src_label] = {}
+                
+                # We will track which target is the closest to this specific source
+                best_target_label = None
+                min_cost = float('inf')
+
+                # First pass: Calculate all costs to find the "best" one
+                temp_results = {} # Store results temporarily
+
+                for tgt_idx, tgt_label in target_list:
+                    try:
+                        cost = nx.shortest_path_length(G, src_idx, tgt_idx, weight='weight')
+                        path_nodes = nx.shortest_path(G, src_idx, tgt_idx, weight='weight')
+                        coords = [pos[n] for n in path_nodes]
+                        
+                        temp_results[tgt_label] = {'cost': cost, 'coords': coords}
+                        
+                        if cost < min_cost:
+                            min_cost = cost
+                            best_target_label = tgt_label
+                            
+                    except nx.NetworkXNoPath:
+                        temp_results[tgt_label] = {'cost': float('inf'), 'coords': None}
+
+                # Second pass: Store in data structures and mark "is_best"
+                for tgt_label, res in temp_results.items():
+                    cost_matrix[src_label][tgt_label] = res['cost']
+                    
+                    if res['coords']:
+                        is_best = (tgt_label == best_target_label)
+                        path_data[category_key][src_label][tgt_label] = {
+                            'coords': res['coords'],
+                            'is_best': is_best
+                        }
+
+        # 2. Compute Robot -> Goals
+        process_group(starts, goals, "starts")
+
+        # 3. Compute Goal -> Collections
+        process_group(goals, collections, "goals")
+
+        return cost_matrix, path_data
 
     def _build_prm(self, inflated_obstacles, initial_nodes_data, bounds) -> nx.Graph:
         """
@@ -282,12 +398,13 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                             break
                             
                     if not is_colliding:
-                        G.add_edge(u, v, weight=d)
+                        # Apply Turn Penalty Heuristic here
+                        G.add_edge(u, v, weight=d + self.turn_penalty)
                         edges_added += 1
         
         return G
 
-    def _plot_prm(self, G, obstacles, special_nodes, filename, bounds=None):
+    def _plot_prm(self, G, obstacles, special_nodes, filename, bounds=None, path_data=None):
         plt.figure(figsize=(12, 12))
         
         # --- 1. Plot Buffered Obstacles (Inflated Boundaries) ---
@@ -338,7 +455,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             lines = [[pos[u], pos[v]] for u, v in G.edges()]
             from matplotlib.collections import LineCollection
             # We don't label every edge, it clutters the legend. We add a proxy artist later if needed.
-            lc = LineCollection(lines, colors='green', linewidths=0.5, alpha=0.3)
+            lc = LineCollection(lines, colors='green', linewidths=0.5, alpha=0.2)
             plt.gca().add_collection(lc)
             
             # Hack to add "Edges" to legend without plotting a dummy line
@@ -347,7 +464,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             # --- 4. Plot Nodes (Samples) ---
             sample_x = [pos[n][0] for n in G.nodes if G.nodes[n].get('type') == 'sample']
             sample_y = [pos[n][1] for n in G.nodes if G.nodes[n].get('type') == 'sample']
-            plt.plot(sample_x, sample_y, 'k.', markersize=1, label='Samples')
+            plt.plot(sample_x, sample_y, 'k.', markersize=1, alpha=0.5, label='Samples')
 
         # --- 5. Plot Special Nodes ---
         for key, color, marker, label_text in [
@@ -357,9 +474,42 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         ]:
             if special_nodes[key]:
                 sx, sy = zip(*special_nodes[key])
-                plt.plot(sx, sy, color=color, marker=marker, linestyle='None', markersize=8, label=label_text)
+                plt.plot(sx, sy, color=color, marker=marker, linestyle='None', markersize=10, label=label_text, zorder=20)
 
-        # --- 6. Final Setup ---
+        # # --- 6. Plot Debug Path ---
+        # if debug_path:
+        #     px, py = zip(*debug_path)
+        #     plt.plot(px, py, 'm-', linewidth=3, label='Sample Path')
+
+        # --- 6. Plot All Paths (Modified Z-Order) ---
+        if path_data:
+            def plot_category_paths(category, color_code):
+                if category not in path_data: return
+                for src_label, targets in path_data[category].items():
+                    for tgt_label, info in targets.items():
+                        path = info['coords']
+                        is_best = info['is_best']
+                        
+                        if is_best:
+                            # Solid Line (Z-Order 5 - Behind Dashed)
+                            plt.plot(*zip(*path), color=color_code, linestyle='-', linewidth=2.5, alpha=0.9, zorder=5)
+                        else:
+                            # Dashed Line (Z-Order 10 - On Top)
+                            # This ensures that if they overlap perfectly, you see the dashes
+                            plt.plot(*zip(*path), color=color_code, linestyle=':', linewidth=2.5, alpha=0.6, zorder=10)
+
+            # Robot->Goal: Dark Violet
+            plot_category_paths("starts", 'darkviolet') 
+            # Goal->Collection: Dark Orange
+            plot_category_paths("goals", 'brown')
+
+            # Legend entries
+            plt.plot([], [], color='darkviolet', linestyle='-', linewidth=2, label='Best (Robot->Goal)')
+            plt.plot([], [], color='darkviolet', linestyle=':', linewidth=1, label='Alt (Robot->Goal)')
+            plt.plot([], [], color='brown', linestyle='-', linewidth=2, label='Best (Goal->Coll)')
+            plt.plot([], [], color='brown', linestyle=':', linewidth=1, label='Alt (Goal->Coll)')
+
+        # --- 7. Final Setup ---
         plt.legend(loc="upper right", fontsize='small', framealpha=0.9)
         plt.title(f"k-NN PRM (N={len(G.nodes)}, Edges={len(G.edges)})")
         plt.axis('equal')
