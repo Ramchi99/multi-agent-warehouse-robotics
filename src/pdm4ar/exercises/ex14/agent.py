@@ -9,6 +9,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from shapely.geometry import Point, LineString, Polygon
 from shapely.ops import unary_union
+from scipy.stats.qmc import Halton
 
 from dg_commons import PlayerName
 from dg_commons.sim import InitSimGlobalObservations, InitSimObservations, SharedGoalObservation, SimObservations
@@ -138,23 +139,36 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                     special_nodes["collections"].append((c.x, c.y))
                     G.add_node(len(G.nodes), pos=(c.x, c.y), type="collection", label=cid)
 
-        # --- 3. SAMPLE REMAINING NODES ---
+        # --- 3. SAMPLE REMAINING NODES (HALTON) ---
         # Dynamic bounds from obstacles (use raw obstacles for tighter sampling/plotting limits)
         raw_combined = unary_union(obs_polygons)
         if not raw_combined.is_empty:
             bounds = raw_combined.bounds # (minx, miny, maxx, maxy)
         else:
             bounds = (-12.0, -12.0, 12.0, 12.0)
-        
-        attempts = 0
-        while len(G.nodes) < self.num_samples and attempts < self.num_samples * 20:
-            attempts += 1
-            x = np.random.uniform(bounds[0], bounds[2])
-            y = np.random.uniform(bounds[1], bounds[3])
-            p = Point(x, y)
             
+        min_x, min_y, max_x, max_y = bounds
+        width = max_x - min_x
+        height = max_y - min_y
+        
+        # Initialize Halton sampler
+        # Generate more samples than needed because some will be rejected
+        sampler = Halton(d=2, scramble=True)
+        raw_samples = sampler.random(n=self.num_samples * 2) 
+        
+        # Scale samples to bounds
+        samples_x = raw_samples[:, 0] * width + min_x
+        samples_y = raw_samples[:, 1] * height + min_y
+        
+        count = 0
+        for x, y in zip(samples_x, samples_y):
+            if count >= self.num_samples:
+                break
+                
+            p = Point(x, y)
             if not p.within(combined_obstacles):
                 G.add_node(len(G.nodes), pos=(x, y), type="sample")
+                count += 1
 
         # --- 4. CONNECT k-NEAREST NEIGHBORS ---
         node_positions = nx.get_node_attributes(G, 'pos')
