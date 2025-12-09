@@ -100,6 +100,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         self.max_candidates = 50    # We CHECK this many to find the valid ones (handles deleted vertices)
         self.robot_radius = 0.8     # Buffer size (robot width/2 + margin)
         self.connection_radius = 10.0 # Max length of an edge
+        self.min_sample_dist = 0.3 # Minimum distance between nodes
 
     def send_plan(self, init_sim_obs: InitSimGlobalObservations) -> str:
         # TODO: implement here your global planning stack.
@@ -125,6 +126,9 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         node_coords = [] # list of [x, y]
         node_indices = [] # list of node IDs
 
+        # Initialize the spatial grid
+        occupied_grids = set()
+
         special_nodes = {
             "starts": [],
             "goals": [],
@@ -140,6 +144,10 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             node_coords.append([state.x, state.y])
             node_indices.append(idx)
 
+            # Mark start node grid cell as occupied
+            gx, gy = int(state.x / self.min_sample_dist), int(state.y / self.min_sample_dist)
+            occupied_grids.add((gx, gy))
+
         # Shared Goals
         if init_sim_obs.shared_goals:
             for gid, sgoal in init_sim_obs.shared_goals.items():
@@ -152,6 +160,10 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                     node_coords.append([c.x, c.y])
                     node_indices.append(idx)
 
+                    # Mark goal node grid cell as occupied
+                    gx, gy = int(c.x / self.min_sample_dist), int(c.y / self.min_sample_dist)
+                    occupied_grids.add((gx, gy))
+
         # Collection Points
         if init_sim_obs.collection_points:
             for cid, cpoint in init_sim_obs.collection_points.items():
@@ -163,6 +175,10 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                     G.add_node(idx, pos=(c.x, c.y), type="collection", label=cid)
                     node_coords.append([c.x, c.y])
                     node_indices.append(idx)
+
+                    # Mark collection node grid cell as occupied
+                    gx, gy = int(c.x / self.min_sample_dist), int(c.y / self.min_sample_dist)
+                    occupied_grids.add((gx, gy))
 
         # --- 3. SAMPLE REMAINING NODES (HALTON + OB-PRM) ---
         raw_combined = unary_union(obs_polygons)
@@ -192,6 +208,12 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         for x, y in zip(samples_x, samples_y):
             if count >= self.num_samples:
                 break
+
+            # Check if grid cell is already occupied
+            gx = int(x / self.min_sample_dist)
+            gy = int(y / self.min_sample_dist)
+            if (gx, gy) in occupied_grids:
+                continue # Skip this sample, it's too close to another one
                 
             p = Point(x, y)
             
@@ -230,6 +252,17 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                     continue
 
             if final_point:
+                # Update the grid with the NEW point's location
+                # Note: If OB-PRM moved the point, calculate grid based on final_point
+                fgx = int(final_point.x / self.min_sample_dist)
+                fgy = int(final_point.y / self.min_sample_dist)
+
+                # Optional: Strict check again for projected points
+                if (fgx, fgy) in occupied_grids:
+                    continue 
+                
+                occupied_grids.add((fgx, fgy))
+
                 # ### [NEW] Add to coord lists and graph
                 idx = len(G.nodes)
                 G.add_node(idx, pos=(final_point.x, final_point.y), type="sample")
