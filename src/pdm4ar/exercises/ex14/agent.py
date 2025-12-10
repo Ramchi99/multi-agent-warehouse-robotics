@@ -73,12 +73,18 @@ class TaskAllocator:
     Solves the Multi-Depot Vehicle Routing Problem.
     Uses Simulated Annealing with Reheating to prevent premature convergence.
     """
-    def __init__(self, 
-                 cost_matrix: Dict[str, Dict[str, float]], 
-                 robots: List[str], 
-                 goals: List[str], 
+    def __init__(self,
+                 cost_matrix: Dict[str, Dict[str, float]],
+                 heading_matrix: Dict[str, Dict[str, Tuple[float, float]]],
+                 initial_headings: Dict[str, float],
+                 w_max: float,
+                 robots: List[str],
+                 goals: List[str],
                  collections: List[str]):
         self.matrix = cost_matrix
+        self.heading_matrix = heading_matrix
+        self.initial_headings = initial_headings
+        self.w_max = w_max if w_max > 0.01 else 0.1
         self.robots = robots
         self.goals = goals
         self.collections = collections
@@ -157,10 +163,12 @@ class TaskAllocator:
         return {r: sched.tasks for r, sched in best_solution_global.items()}
 
     def _generate_greedy_solution(self) -> Dict[str, RobotSchedule]:
-        """Assigns tasks to the robot that can finish it soonest."""
+        """Assigns tasks to the robot that can finish it soonest, accounting for TURN COSTS."""
         schedules = {r: RobotSchedule(r, []) for r in self.robots}
         robot_completion_times = {r: 0.0 for r in self.robots}
         robot_locations = {r: r for r in self.robots} 
+        
+        robot_headings = {r: self.initial_headings.get(r, 0.0) for r in self.robots}
 
         unassigned = list(self.goals)
         
@@ -168,32 +176,68 @@ class TaskAllocator:
             best_r = None
             best_g = None
             best_c = None
-            min_added_cost = float('inf')
             
+            # We look for the assignment that results in the lowest TOTAL finish time
+            min_finish_time = float('inf') 
+            
+            # Temp vars to update state after selection
+            best_g_end_heading = 0.0
+            best_c_end_heading = 0.0
+
             for g in unassigned:
                 c = self.best_collections.get(g)
                 if not c: continue
                 
                 for r in self.robots:
                     curr_loc = robot_locations[r]
-                    dist_to_goal = self.matrix.get(curr_loc, {}).get(g, float('inf'))
-                    dist_to_coll = self.matrix.get(g, {}).get(c, float('inf'))
+                    curr_heading = robot_headings[r] # Get current heading
                     
-                    if dist_to_goal == float('inf') or dist_to_coll == float('inf'):
-                        continue
+                    # --- 1. Path: Current -> Goal ---
+                    dist_g = self.matrix.get(curr_loc, {}).get(g, float('inf'))
+                    if dist_g == float('inf'): continue
 
-                    new_finish_time = robot_completion_times[r] + dist_to_goal + dist_to_coll
+                    # Calculate Turn Cost (Transition to Path)
+                    angles_g = self.heading_matrix.get(curr_loc, {}).get(g, (0.0, 0.0))
+                    path_start_heading = angles_g[0]
                     
-                    if new_finish_time < min_added_cost:
-                        min_added_cost = new_finish_time
+                    diff = path_start_heading - curr_heading
+                    diff = (diff + math.pi) % (2 * math.pi) - math.pi
+                    turn_cost_g = abs(diff) / self.w_max
+                    
+                    # --- 2. Path: Goal -> Collection ---
+                    dist_c = self.matrix.get(g, {}).get(c, float('inf'))
+                    if dist_c == float('inf'): continue
+
+                    # Calculate Turn Cost (Transition at Goal)
+                    # Robot arrives at goal with heading = angles_g[1]
+                    path_end_heading_at_goal = angles_g[1]
+                    
+                    angles_c = self.heading_matrix.get(g, {}).get(c, (0.0, 0.0))
+                    path_start_heading_coll = angles_c[0]
+
+                    diff = path_start_heading_coll - path_end_heading_at_goal
+                    diff = (diff + math.pi) % (2 * math.pi) - math.pi
+                    turn_cost_c = abs(diff) / self.w_max
+
+                    # --- Total Time Calculation ---
+                    # Previous Time + Turn1 + Travel1 + Turn2 + Travel2
+                    new_finish_time = robot_completion_times[r] + turn_cost_g + dist_g + turn_cost_c + dist_c
+                    
+                    if new_finish_time < min_finish_time:
+                        min_finish_time = new_finish_time
                         best_r = r
                         best_g = g
                         best_c = c
+                        # Store the final heading (arriving at collection)
+                        best_c_end_heading = angles_c[1]
 
             if best_r:
                 schedules[best_r].tasks.append(DeliveryTask(best_g, best_c))
-                robot_completion_times[best_r] = min_added_cost
+                robot_completion_times[best_r] = min_finish_time
                 robot_locations[best_r] = best_c 
+                
+                robot_headings[best_r] = best_c_end_heading
+                
                 unassigned.remove(best_g)
             else:
                 break 
@@ -201,25 +245,55 @@ class TaskAllocator:
         return schedules
 
     def _evaluate_makespan(self, solution: Dict[str, RobotSchedule]) -> float:
-        """Calculates the time the LAST robot finishes its tasks."""
         max_time = 0.0
+        
         for r_name, schedule in solution.items():
             current_node = r_name 
+            
+            # 1. Get Robot's starting orientation
+            current_heading = self.initial_headings.get(r_name, 0.0)
+            
             total_time = 0.0
             
             for task in schedule.tasks:
+                # --- A. MOVE TO GOAL ---
                 d1 = self.matrix.get(current_node, {}).get(task.goal_id, float('inf'))
-                d2 = self.matrix.get(task.goal_id, {}).get(task.collection_id, float('inf'))
+                if d1 == float('inf'): return float('inf')
                 
-                # If path is broken, return infinity so this solution is rejected
-                if d1 == float('inf') or d2 == float('inf'):
-                    return float('inf')
-                    
-                total_time += (d1 + d2)
+                # Get angles for this segment (Start, End)
+                angles_1 = self.heading_matrix.get(current_node, {}).get(task.goal_id, (0.0, 0.0))
+                path_start_heading = angles_1[0]
+                path_end_heading = angles_1[1]
+
+                # CALC TURN COST (Transition)
+                diff = path_start_heading - current_heading
+                diff = (diff + math.pi) % (2 * math.pi) - math.pi # Normalize
+                turn_cost = abs(diff) / self.w_max
+                
+                total_time += turn_cost + d1
+                current_heading = path_end_heading # Update robot heading
+                
+                # --- B. MOVE TO COLLECTION ---
+                d2 = self.matrix.get(task.goal_id, {}).get(task.collection_id, float('inf'))
+                if d2 == float('inf'): return float('inf')
+                
+                angles_2 = self.heading_matrix.get(task.goal_id, {}).get(task.collection_id, (0.0, 0.0))
+                path_start_heading = angles_2[0]
+                path_end_heading = angles_2[1]
+
+                # CALC TURN COST (Transition at Goal)
+                diff = path_start_heading - current_heading
+                diff = (diff + math.pi) % (2 * math.pi) - math.pi
+                turn_cost = abs(diff) / self.w_max
+                
+                total_time += turn_cost + d2
+                current_heading = path_end_heading # Update robot heading
+                
                 current_node = task.collection_id
             
             if total_time > max_time:
                 max_time = total_time
+                
         return max_time
 
     def _apply_random_mutation(self, solution: Dict[str, RobotSchedule]):
@@ -328,12 +402,12 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         self.num_samples = 2000         # Can handle more samples now
         self.target_degree = 20         # We WANT this many connections per node
         self.max_candidates = 50        # We CHECK this many to find the valid ones (handles deleted vertices)
-        self.robot_radius = 0.8         # Buffer size (robot width/2 + margin)
+        self.robot_radius = 0.6 + 0.1   # Buffer size (robot width/2 + margin)
         self.connection_radius = 10.0   # Max length of an edge
         self.min_sample_dist = 0.3      # Minimum distance between nodes
         self.turn_penalty = 0.0         # Heuristic cost for "stopping and turning" (meters equivalent)
 
-        self.time_limit = 3.0          # Time limit for task allocation
+        self.time_limit = 20.0          # Time limit for task allocation
 
         self.seed = 42
 
@@ -392,13 +466,30 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         # --- 3. BUILD PRM ---
         G = self._build_prm(inflated_obstacles, initial_nodes_data, bounds)
 
+        # 1. Get Initial Headings
+        initial_headings = {}
+        for name, state in init_sim_obs.initial_states.items():
+            initial_headings[name] = state.psi
+
+        # 2. Get Kinematics for Allocator
+        sg = DiffDriveGeometry.default()
+        sp = DiffDriveParameters.default()
+        _, w_max = self._get_kinematic_limits(sg, sp)
+
         # --- 4. COMPUTE ROUTING DATA (COSTS & PATHS) ---
-        # Returns cost matrix AND a structured dictionary of paths for plotting
-        cost_matrix, path_data = self._compute_routing_data(G)
+        cost_matrix, path_data, heading_matrix = self._compute_routing_data(G)
         print(f"Computed Cost Matrix for {len(cost_matrix)} nodes.")
 
-        # --- 5. TASK ALLOCATION ---
-        allocator = TaskAllocator(cost_matrix, robots_list, goals_list, collections_list)
+        # 4. Initialize Allocator with new args
+        allocator = TaskAllocator(
+            cost_matrix=cost_matrix,
+            heading_matrix=heading_matrix,
+            initial_headings=initial_headings,
+            w_max=w_max,
+            robots=robots_list,
+            goals=goals_list,
+            collections=collections_list
+        )
         assignments = allocator.solve(self.time_limit)
         
         # --- 6. CONSTRUCT FINAL PATHS ---
@@ -452,6 +543,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             2. path_data: { "starts": ..., "goals": ..., "collections": ... }
         """
         cost_matrix = {}
+        heading_matrix = {}
         path_data = {"starts": {}, "goals": {}, "collections": {}}
         pos = nx.get_node_attributes(G, 'pos')
 
@@ -471,6 +563,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         def process_group(source_list, target_list, category_key):
             for src_idx, src_label in source_list:
                 if src_label not in cost_matrix: cost_matrix[src_label] = {}
+                if src_label not in heading_matrix: heading_matrix[src_label] = {}
                 if src_label not in path_data[category_key]: path_data[category_key][src_label] = {}
                 
                 # Temp storage to find best target based on TIME, not DISTANCE
@@ -484,14 +577,26 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                         
                         # 2. Calculate Cost by DURATION (Time)
                         duration = self._calculate_path_duration(coords)
+
+                        # --- NEW: CALCULATE HEADINGS ---
+                        s_angle = 0.0
+                        e_angle = 0.0
+                        if len(coords) >= 2:
+                            # Heading of the first segment
+                            s_angle = math.atan2(coords[1][1] - coords[0][1], coords[1][0] - coords[0][0])
+                            # Heading of the last segment
+                            e_angle = math.atan2(coords[-1][1] - coords[-2][1], coords[-1][0] - coords[-2][0])
+                        # -------------------------------
                         
                         candidates.append((duration, tgt_label, coords))
                         
                         # Store in matrix
                         cost_matrix[src_label][tgt_label] = duration
+                        heading_matrix[src_label][tgt_label] = (s_angle, e_angle)
                         
                     except nx.NetworkXNoPath:
                         cost_matrix[src_label][tgt_label] = float('inf')
+                        heading_matrix[src_label][tgt_label] = (0.0, 0.0)
 
                 # 3. Find which target was the "best" (fastest) and mark it
                 if candidates:
@@ -511,7 +616,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         # 4. Compute Collection -> Goals (For multi-step missions)
         process_group(collections, goals, "collections")
 
-        return cost_matrix, path_data
+        return cost_matrix, path_data, heading_matrix
 
     def _get_kinematic_limits(self, sg: DiffDriveGeometry, sp: DiffDriveParameters) -> Tuple[float, float]:
         """Derives v_max [m/s] and omega_max [rad/s] from robot structures."""
