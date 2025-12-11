@@ -977,3 +977,461 @@ class TaskAllocatorLNS3(TaskAllocatorLNS2):
                 removed_objs.append(task)
                 
         return solution, removed_objs
+
+class TaskAllocatorALNS(TaskAllocatorBase):
+    """
+    Adaptive Large Neighborhood Search (ALNS) - Standalone Implementation.
+    
+    This class implements the State-of-the-Art ALNS metaheuristic.
+    It adaptively selects between different 'Destroy' operators based on their 
+    past performance, allowing it to perform like LNS2 (Random/Worst) when 
+    time is short or the problem is simple, and like LNS3 (Spatial) when 
+    escaping deep local optima is required.
+    
+    It is fully self-contained (except for the Base data holder) to allow 
+    deprecation of previous classes.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # --- ALNS Parameters ---
+        # [IMPROVEMENT] Conservative Spatial Start:
+        # Start 'spatial' lower so we behave like the fast LNS2 initially.
+        # If spatial proves useful (long runs), it will earn its way up.
+        # [IMPROVEMENT] Exploration Bias:
+        # Start with 1.5/1.0 (~60/40 split) to match LNS2's optimal strategy.
+        self.scores = {
+            'random': 1.5,
+            'worst': 1.0,
+            'spatial': 0.1 
+        }
+        self.usage_counts = {k: 0 for k in self.scores}
+        
+        # Rewards
+        self.sigma_1 = 2.0  # New Global Best
+        self.sigma_2 = 1.0  # Improved Current
+        self.sigma_3 = 0.1  # Accepted (worse but accepted)
+        self.sigma_4 = 0.0  # Rejected
+        
+        self.decay = 0.95   # Smoothing factor for weights
+        
+    def solve(self, time_limit: float = 2.0) -> Dict[str, List[DeliveryTask]]:
+        print(f"--- Running ALNS (Time Limit: {time_limit}s) ---")
+        start_time = time.time()
+        
+        # 1. Initialization
+        current_sol = {r: RobotSchedule(r, []) for r in self.robots}
+        all_tasks = [DeliveryTask(g, self.collections[0]) for g in self.goals]
+        
+        # Construct initial solution
+        current_sol = self._repair_regret_noise(current_sol, all_tasks, noise_level=0.1)
+        self._intensify_solution(current_sol)
+        
+        best_sol = {r: sched.clone() for r, sched in current_sol.items()}
+        best_cost = self._evaluate_makespan(best_sol)
+        current_cost = best_cost
+        
+        # [IMPROVEMENT] Dynamic Temperature
+        # Start HOT (min 50.0) to match LNS2's ability to escape local optima.
+        temperature = max(50.0, current_cost * 0.5)
+        cooling_rate = 0.98 
+        iterations = 0
+        
+        n_tasks = len(self.goals)
+        min_rem = 1
+        max_rem = max(1, min(4, int(n_tasks * 0.4)))
+        
+        # [IMPROVEMENT] Complexity Matching
+        # For small problems (< 10 goals), Spatial destruction is mathematically 
+        # equivalent to Random but slower. Disable it to match LNS2's speed.
+        if n_tasks < 10:
+            self.scores['spatial'] = 0.0
+        
+        # ALNS Loop
+        while (time.time() - start_time) < time_limit:
+            iterations += 1
+            
+            # A. Select Operator
+            op_name = self._select_operator()
+            self.usage_counts[op_name] += 1
+            
+            # B. Clone
+            temp_sol = {r: sched.clone() for r, sched in current_sol.items()}
+            
+            # C. Destroy
+            n_remove = random.randint(min_rem, max_rem)
+            removed_tasks = []
+            
+            if op_name == 'random':
+                temp_sol, removed_tasks = self._destroy_random(temp_sol, n_remove)
+            elif op_name == 'worst':
+                temp_sol, removed_tasks = self._destroy_worst(temp_sol, n_remove)
+            elif op_name == 'spatial':
+                temp_sol, removed_tasks = self._destroy_spatial(temp_sol, n_remove)
+            
+            # D. Repair
+            # We use Regret with Noise as the standard robust repair operator
+            temp_sol = self._repair_regret_noise(temp_sol, removed_tasks, noise_level=0.2)
+            
+            # E. Intensify (Micro-Optimization)
+            self._intensify_solution(temp_sol)
+            
+            # F. Evaluate
+            new_cost = self._evaluate_makespan(temp_sol)
+            
+            # G. Acceptance & Scoring
+            delta = new_cost - current_cost
+            accepted = False
+            reward = self.sigma_4
+            
+            if delta < 0:
+                accepted = True
+                if new_cost < best_cost:
+                    reward = self.sigma_1
+                    best_sol = {r: sched.clone() for r, sched in temp_sol.items()}
+                    best_cost = new_cost
+                else:
+                    reward = self.sigma_2
+            elif random.random() < math.exp(-delta / max(temperature, 1e-5)):
+                accepted = True
+                reward = self.sigma_3
+            
+            if accepted:
+                current_sol = temp_sol
+                current_cost = new_cost
+            
+            # H. Update Weights
+            self._update_weight(op_name, reward)
+            
+            temperature *= cooling_rate
+
+        # Print Statistics
+        print(f"ALNS Finished: Best Cost {best_cost:.2f} | Iterations: {iterations}")
+        print(f"Operator Scores: {self.scores}")
+        print(f"Operator Usage: {self.usage_counts}")
+        
+        return {r: sched.tasks for r, sched in best_sol.items()}
+
+    def _select_operator(self):
+        """Roulette Wheel Selection based on weights."""
+        total = sum(self.scores.values())
+        r = random.uniform(0, total)
+        curr = 0
+        for name, score in self.scores.items():
+            curr += score
+            if r <= curr:
+                return name
+        return 'random' # Fallback
+
+    def _update_weight(self, op_name, reward):
+        old_score = self.scores[op_name]
+        new_score = self.decay * old_score + (1 - self.decay) * reward
+        
+        # Clamp to avoid starvation
+        self.scores[op_name] = max(0.1, new_score)
+        
+        # [IMPROVEMENT] Guaranteed Exploration
+        # Never let 'random' drop below a safe floor.
+        # This prevents the algorithm from becoming too greedy/deterministic.
+        if op_name == 'random':
+            self.scores['random'] = max(0.5, self.scores['random'])
+        elif op_name == 'worst':
+            self.scores['worst'] = max(0.5, self.scores['worst'])
+
+    # --- 1. DESTROY OPERATORS ---
+    
+    def _destroy_random(self, solution, n):
+        all_tasks_flat = []
+        for r, sched in solution.items():
+            for t in sched.tasks: all_tasks_flat.append((r, t))
+        if not all_tasks_flat: return solution, []
+        
+        to_remove = random.sample(all_tasks_flat, k=min(n, len(all_tasks_flat)))
+        for r_name, task in to_remove:
+            solution[r_name].tasks.remove(task)
+            
+        return solution, [t for r, t in to_remove]
+
+    def _destroy_worst(self, solution, n):
+        candidates = []
+        for r_name, sched in solution.items():
+            if not sched.tasks: continue
+            prev_loc = r_name
+            for i, task in enumerate(sched.tasks):
+                next_loc = sched.tasks[i+1].goal_id if i+1 < len(sched.tasks) else None
+                
+                d1 = self.matrix.get(prev_loc, {}).get(task.goal_id, 0)
+                d2 = self.matrix.get(task.goal_id, {}).get(task.collection_id, 0)
+                d3 = self.matrix.get(task.collection_id, {}).get(next_loc, 0) if next_loc else 0
+                shortcut = self.matrix.get(prev_loc, {}).get(next_loc, 0) if next_loc else 0
+                
+                savings = (d1 + d2 + d3) - shortcut
+                candidates.append((savings, r_name, task))
+                prev_loc = task.collection_id
+                
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        removed_objs = []
+        for _, r_name, task in candidates[:n]:
+            if task in solution[r_name].tasks:
+                solution[r_name].tasks.remove(task)
+                removed_objs.append(task)
+                
+        return solution, removed_objs
+
+    def _destroy_spatial(self, solution, n):
+        all_tasks = []
+        for r, sched in solution.items():
+            for t in sched.tasks: all_tasks.append((r, t))
+        if not all_tasks: return solution, []
+        
+        seed_r, seed_t = random.choice(all_tasks)
+        seed_goal = seed_t.goal_id
+        
+        dists = []
+        for r, t in all_tasks:
+            dist = self.matrix.get(seed_goal, {}).get(t.goal_id, float('inf'))
+            dists.append((dist, r, t))
+            
+        dists.sort(key=lambda x: x[0])
+        to_remove = dists[:n]
+        
+        removed_objs = []
+        for _, r_name, task in to_remove:
+            if task in solution[r_name].tasks:
+                solution[r_name].tasks.remove(task)
+                removed_objs.append(task)
+                
+        return solution, removed_objs
+
+    # --- 2. REPAIR OPERATORS ---
+    
+    def _repair_regret_noise(self, solution, tasks_to_insert, noise_level=0.1):
+        random.shuffle(tasks_to_insert)
+        
+        robot_finish_times = {
+            r: self._calculate_schedule_duration(r, sched.tasks) 
+            for r, sched in solution.items()
+        }
+
+        while tasks_to_insert:
+            regrets = []
+            
+            for task in tasks_to_insert:
+                options = []
+                for r_name, sched in solution.items():
+                    current_r_time = robot_finish_times[r_name]
+                    for i in range(len(sched.tasks) + 1):
+                        cost_increase, best_c = self._calc_insertion_cost(sched, task, i)
+                        if best_c is None: continue
+                        
+                        noise = random.uniform(1.0 - noise_level, 1.0 + noise_level)
+                        new_finish_time = (current_r_time + cost_increase) * noise
+                        options.append((new_finish_time, cost_increase, r_name, i, best_c))
+                
+                if not options: continue
+                # Sort by Weighted Objective (Makespan priority)
+                # alpha = 0.7
+                alpha = 0.7
+                options.sort(key=lambda x: (alpha * x[0]) + ((1 - alpha) * x[1]))
+                # Simple Min-Finish time works well for Makespan
+                # options.sort(key=lambda x: x[0])
+                
+                best = options[0]
+                second = options[1][0] if len(options) > 1 else float('inf')
+                
+                regret_val = second - best[0]
+                
+                regrets.append({
+                    'regret': regret_val, 
+                    'task': task, 
+                    'vals': best
+                })
+            
+            if not regrets: break
+            regrets.sort(key=lambda x: x['regret'], reverse=True)
+            
+            winner = regrets[0]
+            t = winner['task']
+            vals = winner['vals'] 
+            
+            t.collection_id = vals[4]
+            solution[vals[2]].tasks.insert(vals[3], t)
+            robot_finish_times[vals[2]] += vals[1]
+            
+            tasks_to_insert.remove(t)
+            
+        return solution
+    
+    def _calc_insertion_cost(self, schedule, task, idx):
+        if idx == 0:
+            prev_loc = schedule.robot_name
+            prev_heading = self.initial_headings.get(prev_loc, 0.0)
+        else:
+            prev_task = schedule.tasks[idx-1]
+            prev_loc = prev_task.collection_id
+            # Approx Heading
+            pg = prev_task.goal_id
+            pc = prev_task.collection_id
+            prev_heading = self.heading_matrix.get(pg, {}).get(pc, (0.0, 0.0))[1]
+
+        next_loc = schedule.tasks[idx].goal_id if idx < len(schedule.tasks) else None
+        
+        # Base Cost: Prev -> Goal
+        d_pg = self.matrix.get(prev_loc, {}).get(task.goal_id, float('inf'))
+        if d_pg == float('inf'): return float('inf'), None
+        
+        angles_pg = self.heading_matrix.get(prev_loc, {}).get(task.goal_id, (0.0, 0.0))
+        turn_pg = abs((angles_pg[0] - prev_heading + math.pi) % (2*math.pi) - math.pi) / self.w_max
+        cost_pg = turn_pg + d_pg
+        heading_at_goal = angles_pg[1]
+        
+        # Optimize C
+        best_c = None
+        min_seg = float('inf')
+        
+        for c in self.collections:
+            d_gc = self.matrix.get(task.goal_id, {}).get(c, float('inf'))
+            if d_gc == float('inf'): continue
+            
+            angles_gc = self.heading_matrix.get(task.goal_id, {}).get(c, (0.0, 0.0))
+            turn_gc = abs((angles_gc[0] - heading_at_goal + math.pi) % (2*math.pi) - math.pi) / self.w_max
+            cost_gc = turn_gc + d_gc
+            heading_at_c = angles_gc[1]
+            
+            cost_cn = 0.0
+            if next_loc:
+                d_cn = self.matrix.get(c, {}).get(next_loc, float('inf'))
+                if d_cn == float('inf'): continue
+                angles_cn = self.heading_matrix.get(c, {}).get(next_loc, (0.0, 0.0))
+                turn_cn = abs((angles_cn[0] - heading_at_c + math.pi) % (2*math.pi) - math.pi) / self.w_max
+                cost_cn = turn_cn + d_cn
+            
+            if (cost_gc + cost_cn) < min_seg:
+                min_seg = cost_gc + cost_cn
+                best_c = c
+                
+        if best_c is None: return float('inf'), None
+        
+        added = cost_pg + min_seg
+        removed = 0.0
+        if next_loc:
+            d_pn = self.matrix.get(prev_loc, {}).get(next_loc, float('inf'))
+            if d_pn < float('inf'):
+                angles_pn = self.heading_matrix.get(prev_loc, {}).get(next_loc, (0.0, 0.0))
+                turn_pn = abs((angles_pn[0] - prev_heading + math.pi) % (2*math.pi) - math.pi) / self.w_max
+                removed = turn_pn + d_pn
+                
+        return added - removed, best_c
+
+    # --- 3. INTENSIFICATION (Exact Viterbi) ---
+    
+    def _intensify_solution(self, solution):
+        for r_name, sched in solution.items():
+            if not sched.tasks: continue
+            if len(sched.tasks) <= 6:
+                self._optimize_route_exact(r_name, sched)
+            else:
+                self._optimize_route_2opt(r_name, sched)
+
+    def _optimize_route_exact(self, r_name, schedule):
+        if len(schedule.tasks) < 1: return
+        current_min_time = float('inf')
+        best_perm_tasks = None
+        start_heading = self.initial_headings.get(r_name, 0.0)
+        
+        for perm in itertools.permutations(schedule.tasks):
+            perm_tasks = [t.clone() for t in perm]
+            cost = self._optimize_dropoffs_exact_dp(r_name, start_heading, perm_tasks)
+            if cost < current_min_time:
+                current_min_time = cost
+                best_perm_tasks = perm_tasks
+
+        if best_perm_tasks:
+            schedule.tasks = best_perm_tasks
+
+    def _optimize_route_2opt(self, r_name, schedule):
+        improved = True
+        start_heading = self.initial_headings.get(r_name, 0.0)
+        while improved:
+            improved = False
+            current_time = self._optimize_dropoffs_exact_dp(r_name, start_heading, schedule.tasks)
+            for i in range(len(schedule.tasks) - 1):
+                for j in range(i + 1, len(schedule.tasks)):
+                    schedule.tasks[i], schedule.tasks[j] = schedule.tasks[j], schedule.tasks[i]
+                    test_tasks = [t.clone() for t in schedule.tasks]
+                    new_time = self._optimize_dropoffs_exact_dp(r_name, start_heading, test_tasks)
+                    if new_time < current_time - 1e-4:
+                        current_time = new_time
+                        schedule.tasks = test_tasks
+                        improved = True
+                    else:
+                        schedule.tasks[i], schedule.tasks[j] = schedule.tasks[j], schedule.tasks[i]
+                    if improved: break
+                if improved: break
+
+    def _optimize_dropoffs_exact_dp(self, start_node, start_heading, tasks) -> float:
+        if not tasks: return 0.0
+        dp = []
+        
+        # Layer 0
+        task0 = tasks[0]
+        layer0 = {}
+        d_sg = self.matrix.get(start_node, {}).get(task0.goal_id, float('inf'))
+        if d_sg == float('inf'): return float('inf')
+        
+        angles_sg = self.heading_matrix.get(start_node, {}).get(task0.goal_id, (0.0, 0.0))
+        turn_sg = abs((angles_sg[0] - start_heading + math.pi) % (2 * math.pi) - math.pi) / self.w_max
+        cost_arrival_g0 = turn_sg + d_sg
+        heading_arrival_g0 = angles_sg[1]
+        
+        for c in self.collections:
+            d_gc = self.matrix.get(task0.goal_id, {}).get(c, float('inf'))
+            if d_gc == float('inf'): continue
+            angles_gc = self.heading_matrix.get(task0.goal_id, {}).get(c, (0.0, 0.0))
+            turn_gc = abs((angles_gc[0] - heading_arrival_g0 + math.pi) % (2 * math.pi) - math.pi) / self.w_max
+            total = cost_arrival_g0 + turn_gc + d_gc
+            heading_arrival_c = angles_gc[1]
+            layer0[c] = (total, None, heading_arrival_c)
+        dp.append(layer0)
+        
+        # Layers 1..N
+        for i in range(1, len(tasks)):
+            curr_task = tasks[i]
+            prev_layer = dp[-1]
+            curr_layer = {}
+            if not prev_layer: return float('inf')
+            
+            for prev_c, (prev_cost, _, prev_heading_arr) in prev_layer.items():
+                d_pg = self.matrix.get(prev_c, {}).get(curr_task.goal_id, float('inf'))
+                if d_pg == float('inf'): continue
+                
+                angles_pg = self.heading_matrix.get(prev_c, {}).get(curr_task.goal_id, (0.0, 0.0))
+                turn_pg = abs((angles_pg[0] - prev_heading_arr + math.pi) % (2 * math.pi) - math.pi) / self.w_max
+                cost_arr_g = prev_cost + turn_pg + d_pg
+                heading_arr_g = angles_pg[1]
+                
+                for curr_c in self.collections:
+                    d_gc = self.matrix.get(curr_task.goal_id, {}).get(curr_c, float('inf'))
+                    if d_gc == float('inf'): continue
+                    angles_gc = self.heading_matrix.get(curr_task.goal_id, {}).get(curr_c, (0.0, 0.0))
+                    turn_gc = abs((angles_gc[0] - heading_arr_g + math.pi) % (2 * math.pi) - math.pi) / self.w_max
+                    total_new_cost = cost_arr_g + turn_gc + d_gc
+                    heading_arr_curr_c = angles_gc[1]
+                    
+                    if curr_c not in curr_layer or total_new_cost < curr_layer[curr_c][0]:
+                        curr_layer[curr_c] = (total_new_cost, prev_c, heading_arr_curr_c)
+            dp.append(curr_layer)
+            
+        last_layer = dp[-1]
+        if not last_layer: return float('inf')
+        
+        best_end_c = min(last_layer, key=lambda k: last_layer[k][0])
+        min_total_cost = last_layer[best_end_c][0]
+        
+        curr_c = best_end_c
+        for i in range(len(tasks) - 1, -1, -1):
+            tasks[i].collection_id = curr_c
+            curr_c = dp[i][curr_c][1]
+            
+        return min_total_cost

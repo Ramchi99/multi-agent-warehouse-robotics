@@ -30,7 +30,7 @@ from dg_commons.sim.models.obstacles import StaticObstacle
 from numpydantic import NDArray
 from pydantic import BaseModel
 
-from .task_allocator import DeliveryTask, RobotSchedule, TaskAllocatorSA, TaskAllocatorLNS, TaskAllocatorLNS2, TaskAllocatorLNS3
+from .task_allocator import DeliveryTask, RobotSchedule, TaskAllocatorSA, TaskAllocatorLNS, TaskAllocatorLNS2, TaskAllocatorLNS3, TaskAllocatorALNS
 
 
 class GlobalPlanMessage(BaseModel):
@@ -110,7 +110,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         self.min_sample_dist = 0.3  # Minimum distance between nodes # 0.3
         self.turn_penalty = 0.0  # Heuristic cost for "stopping and turning" (meters equivalent)
 
-        self.time_limit = 10.0  # Time limit for task allocation
+        self.time_limit = 10.0  # Time limit for task allocation # 10.0
 
         self.seed = 42
 
@@ -222,19 +222,27 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         lns3_assignments = allocator_lns3.solve(time_limit=self.time_limit)
         lns3_cost = allocator_lns3._evaluate_makespan({r: RobotSchedule(r, t) for r, t in lns3_assignments.items()})
 
+        # B. Run ALNS (Adaptive)
+        allocator_alns = TaskAllocatorALNS(**alloc_args)
+        alns_assignments = allocator_alns.solve(time_limit=self.time_limit)
+        alns_cost = allocator_alns._evaluate_makespan({r: RobotSchedule(r, t) for r, t in alns_assignments.items()})
 
         print(f"--- RESULT COMPARISON ---")
         print(f"SA Cost:  {sa_cost:.2f}")
         print(f"LNS Cost: {lns_cost:.2f}")
         print(f"LNS2 Cost: {lns2_cost:.2f}")
         print(f"LNS3 Cost: {lns3_cost:.2f}")
+        print(f"ALNS Cost: {alns_cost:.2f}")
 
         # --- NEW: Call Debug Printer ---
         # self._print_debug_comparison(sa_assignments, lns_assignments, cost_matrix, heading_matrix)
         # -------------------------------
 
         # Pick the winner
-        if lns3_cost <= sa_cost and lns3_cost <= lns_cost and lns3_cost <= lns2_cost:
+        if alns_cost <= sa_cost and alns_cost <= lns_cost and alns_cost <= lns2_cost and alns_cost <= lns3_cost:
+            print(">> Using ALNS Plan")
+            assignments = alns_assignments
+        elif lns3_cost <= sa_cost and lns3_cost <= lns_cost and lns3_cost <= lns2_cost:
             print(">> Using LNS3 Plan")
             assignments = lns3_assignments
         elif lns2_cost <= sa_cost and lns2_cost <= lns_cost:
