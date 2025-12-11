@@ -178,9 +178,13 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         sg = DiffDriveGeometry.default()
         sp = DiffDriveParameters.default()
         _, w_max = self._get_kinematic_limits(sg, sp)
+        
+        # --- Create STRtree for Smoothing ---
+        obstacle_tree = STRtree(inflated_obstacles)
 
         # --- 4. COMPUTE ROUTING DATA (COSTS & PATHS) ---
-        cost_matrix, path_data, heading_matrix = self._compute_routing_data(G)
+        # [MODIFIED] Now passing obstacle data for smoothing
+        cost_matrix, path_data, heading_matrix = self._compute_routing_data(G, obstacle_tree, inflated_obstacles)
         print(f"Computed Cost Matrix for {len(cost_matrix)} nodes.")
 
         # 4. Initialize Allocator ARGS
@@ -284,15 +288,30 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         """Helper to find path coordinates from any bucket"""
         for cat in path_data.values():
             if src in cat and dst in cat[src]:
-                return cat[src][dst]["coords"]
+                # [NEW] Densify just before returning for the final plan
+                raw_coords = cat[src][dst]["coords"]
+                return self._densify_path(raw_coords, step=0.05)
         return []
+    
+    def _densify_path(self, coords, step=0.1):
+        """Injects points into sparse path for controller stability."""
+        if not coords or len(coords) < 2: return coords
+        new_coords = [coords[0]]
+        for i in range(len(coords)-1):
+            p1 = np.array(coords[i])
+            p2 = np.array(coords[i+1])
+            dist = np.linalg.norm(p2 - p1)
+            if dist > step:
+                num_points = int(dist / step)
+                for j in range(1, num_points + 1):
+                    new_coords.append(tuple(p1 + (p2 - p1) * (j / (num_points + 1))))
+            new_coords.append(coords[i+1])
+        return new_coords
 
-    def _compute_routing_data(self, G) -> Tuple[dict, dict]:
+    def _compute_routing_data(self, G, obstacle_tree, inflated_obstacles) -> Tuple[dict, dict]:
         """
         Computes APSP for POIs and extracts ALL paths.
-        Returns:
-            1. cost_matrix: {SourceLabel: {TargetLabel: Cost}}
-            2. path_data: { "starts": ..., "goals": ..., "collections": ... }
+        Now includes POST-PROCESS SMOOTHING.
         """
         cost_matrix = {}
         heading_matrix = {}
@@ -328,22 +347,26 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                     try:
                         # 1. Get Shortest Path by DISTANCE (Geometric Path)
                         path_nodes = nx.shortest_path(G, src_idx, tgt_idx, weight="weight")
-                        coords = [pos[n] for n in path_nodes]
+                        raw_coords = [pos[n] for n in path_nodes]
+                        
+                        # [NEW] SMOOTH PATH
+                        smoothed_coords = self._smooth_path(raw_coords, obstacle_tree, inflated_obstacles)
 
                         # 2. Calculate Cost by DURATION (Time)
-                        duration = self._calculate_path_duration(coords)
+                        # We use the SMOOTHED coords for cost calculation!
+                        duration = self._calculate_path_duration(smoothed_coords)
 
                         # --- NEW: CALCULATE HEADINGS ---
                         s_angle = 0.0
                         e_angle = 0.0
-                        if len(coords) >= 2:
+                        if len(smoothed_coords) >= 2:
                             # Heading of the first segment
-                            s_angle = math.atan2(coords[1][1] - coords[0][1], coords[1][0] - coords[0][0])
+                            s_angle = math.atan2(smoothed_coords[1][1] - smoothed_coords[0][1], smoothed_coords[1][0] - smoothed_coords[0][0])
                             # Heading of the last segment
-                            e_angle = math.atan2(coords[-1][1] - coords[-2][1], coords[-1][0] - coords[-2][0])
+                            e_angle = math.atan2(smoothed_coords[-1][1] - smoothed_coords[-2][1], smoothed_coords[-1][0] - smoothed_coords[-2][0])
                         # -------------------------------
 
-                        candidates.append((duration, tgt_label, coords))
+                        candidates.append((duration, tgt_label, smoothed_coords))
 
                         # Store in matrix
                         cost_matrix[src_label][tgt_label] = duration
@@ -369,6 +392,47 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         process_group(collections, goals, "collections")
 
         return cost_matrix, path_data, heading_matrix
+
+    def _smooth_path(self, coords, obstacle_tree, inflated_obstacles):
+        """
+        Greedy Shortcutting:
+        Iterate from Start. Try to connect to the furthest possible node in the sequence
+        that is visible (collision-free).
+        """
+        if len(coords) < 3: return coords
+        
+        smoothed = [coords[0]]
+        current_idx = 0
+        
+        while current_idx < len(coords) - 1:
+            # Look ahead from end to current+1
+            best_next_idx = current_idx + 1
+            
+            # Check indices from End down to Current+2
+            # We want the FURTHEST reachable node
+            for check_idx in range(len(coords) - 1, current_idx + 1, -1):
+                
+                # Check line segment
+                p1 = coords[current_idx]
+                p2 = coords[check_idx]
+                line = LineString([p1, p2])
+                
+                # Fast AABB check
+                possible_obs = obstacle_tree.query(line)
+                is_colliding = False
+                for idx in possible_obs:
+                    if inflated_obstacles[idx].intersects(line):
+                        is_colliding = True
+                        break
+                
+                if not is_colliding:
+                    best_next_idx = check_idx
+                    break # Found the furthest one
+            
+            smoothed.append(coords[best_next_idx])
+            current_idx = best_next_idx
+            
+        return smoothed
 
     def _get_kinematic_limits(self, sg: DiffDriveGeometry, sp: DiffDriveParameters) -> Tuple[float, float]:
         """Derives v_max [m/s] and omega_max [rad/s] from robot structures."""
