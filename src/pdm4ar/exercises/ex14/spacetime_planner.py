@@ -165,41 +165,87 @@ class SpaceTimeRoadmapPlanner:
     def plan_prioritized(self, 
                          assignments: Dict[str, List[any]], 
                          path_data: dict, 
-                         initial_states: Dict[str, Tuple[float, float, float]]) -> Tuple[Dict[str, List[TrajectoryPoint]], Dict[str, float]]:
+                         initial_states: Dict[str, Tuple[float, float, float]]) -> Tuple[Dict[str, List[TrajectoryPoint]], Dict[str, float], int]:
         
-        # Reset State
+        robots = list(assignments.keys())
+        
+        # Heuristic: Sort by longest path first (default)
+        heuristic_order = sorted(robots, key=lambda r: len(assignments[r]), reverse=True)
+        
+        # Decide on Permutations
+        # If N <= 4 (24 perms), force brute force.
+        # If N >= 5, stick to heuristic to avoid timeouts.
+        if len(robots) <= 4:
+            permutations = list(itertools.permutations(robots))
+        else:
+            permutations = [tuple(heuristic_order)]
+            
+        print(f"--- Hybrid Space-Time Planner: Checking {len(permutations)} permutations ---")
+        
+        best_result = None
+        best_score = (float('inf'), float('inf')) # (Failures, Makespan)
+        
+        for i, perm in enumerate(permutations):
+            res = self._run_priority_pass(list(perm), assignments, path_data, initial_states)
+            final_plans, mission_times, d_paths, d_waits, fail_count = res
+            
+            # Calculate Makespan (Mission End)
+            makespan = 0.0
+            if mission_times:
+                makespan = max(mission_times.values())
+            
+            # Score: Minimize Failures first, then Makespan
+            current_score = (fail_count, makespan)
+            
+            if current_score < best_score:
+                best_score = current_score
+                best_result = res
+                
+        # Unpack Best
+        final_plans, mission_times, d_paths, d_waits, fail_count = best_result
+        
+        # Update Class State for Visualization
+        self.debug_paths = d_paths
+        self.debug_waits = d_waits
+        
+        # --- Visualization Truncation ---
+        if mission_times:
+            global_mission_end = max(mission_times.values()) if mission_times else 0.0
+            for r_name in self.debug_paths:
+                self.debug_paths[r_name] = [p for p in self.debug_paths[r_name] if p[2] <= global_mission_end + 0.1]
+                
+        print(f"--- Selected Best Permutation (Failures: {fail_count}, Makespan: {best_score[1]:.2f}s) ---")
+        return final_plans, mission_times, fail_count
+
+    def _run_priority_pass(self, 
+                           ordered_robots: List[str],
+                           assignments: Dict[str, List[any]], 
+                           path_data: dict, 
+                           initial_states: Dict[str, Tuple[float, float, float]]):
+        
+        # Local State per pass
         self.st_hash = SpatialTimeHash() 
-        self.debug_waits = []
-        self.debug_paths = {}
+        local_debug_waits = []
+        local_debug_paths = {}
         final_plans = {}
         mission_times = {}
+        failure_count = 0
         
-        # Sort Priority: Longest path first
-        sorted_robots = sorted(assignments.keys(), key=lambda r: len(assignments[r]), reverse=True)
-        
-        print(f"--- Hybrid Space-Time Planner (N={len(sorted_robots)}) ---")
-
-        for r_name in sorted_robots:
+        for r_name in ordered_robots:
             start_pose = initial_states[r_name]
             tasks = assignments[r_name]
             
-            # A. Extract Segments (Start->G1, G1->C1, C1->G2...)
             segments = self._extract_geometric_segments(r_name, tasks, path_data)
             
             full_robot_traj = []
             curr_pose = start_pose
             curr_time = 0.0
             
-            # The last task is "Return", which contributes 2 segments.
-            # We record time before these 2 segments.
             mission_end_idx = len(segments) - 3
             recorded_mission_time = 0.0
             
             if not segments:
-                # Idle if no tasks
-                dummy = [TrajectoryPoint(start_pose[0], start_pose[1], start_pose[2], t, 0, 0, "idle") for t in np.arange(0, 5.0, 0.1)]
-                final_plans[r_name] = dummy
-                self.st_hash.add_dense_trajectory(dummy, self.radius)
+                mission_times[r_name] = 0.0
                 continue
 
             success = True
@@ -207,41 +253,30 @@ class SpaceTimeRoadmapPlanner:
             for seg_idx, raw_path in enumerate(segments):
                 if not raw_path: continue
                 
-                # Densify reasonably
                 geometric_path = self._densify_segment(raw_path, spacing=0.5)
-
-                # B. Modify Graph In-Place (Add Overlay)
                 added_nodes, overlay_map = self._add_overlay(geometric_path)
                 
-                # Define helper for this segment
                 get_node_data = self.base_graph.nodes
                 def get_pos(n):
                     if n in overlay_map: return overlay_map[n]
                     return get_node_data[n]['pos']
 
                 try:
-                    # C. Execute Space-Time A*
-                    start_node = -1 # First node in overlay is -1 - 0 = -1
+                    start_node = -1 
                     goal_node = -1 - (len(geometric_path)-1)
-                    
                     start_t_idx = int(math.ceil(curr_time / self.dt))
                     
-                    # Pass get_pos to A* to avoid closure overhead issues if any
                     node_sequence = self._spacetime_astar(
                         self.base_graph, get_pos, start_node, goal_node, curr_pose[2], start_t_idx
                     )
                 finally:
-                    # D. Cleanup Graph (Remove Overlay) - GUARANTEED EXECUTION
                     self._remove_overlay(added_nodes)
                 
                 if node_sequence:
-                    # RE-SIMULATE to generate trajectory
-                    # We need the start heading for this segment
                     seg_start_h = curr_pose[2]
                     seg_traj, waits = self._nodes_to_trajectory(node_sequence, get_pos, seg_start_h)
                     
                     if full_robot_traj and seg_traj:
-                        # Smooth transition
                         if math.hypot(seg_traj[0].x - full_robot_traj[-1].x, seg_traj[0].y - full_robot_traj[-1].y) < 1e-3:
                              full_robot_traj.extend(seg_traj[1:])
                         else:
@@ -258,46 +293,28 @@ class SpaceTimeRoadmapPlanner:
                         recorded_mission_time = curr_time
                     
                     for w_pos, w_dur in waits:
-                         self.debug_waits.append((w_pos[0], w_pos[1], w_dur, r_name))
+                         local_debug_waits.append((w_pos[0], w_pos[1], w_dur, r_name))
 
                 else:
-                    print(f"  [!] {r_name}: Segment {seg_idx} failed. Holding.")
-                    # Extend wait to 30s to show 'indefinite' wait in plot
+                    # print(f"  [!] {r_name}: Segment {seg_idx} failed. Holding.")
                     dummy = [TrajectoryPoint(curr_pose[0], curr_pose[1], curr_pose[2], curr_time + t, 0, 0, "wait") for t in np.arange(0, 30.0, 0.1)]
                     full_robot_traj.extend(dummy)
-                    # Add a visual debug marker for the failure
-                    self.debug_waits.append((curr_pose[0], curr_pose[1], 30.0, f"{r_name} (STUCK)"))
+                    local_debug_waits.append((curr_pose[0], curr_pose[1], 30.0, f"{r_name} (STUCK)"))
                     success = False
+                    failure_count += 1
                     break 
 
-            # If no segments, time is 0. If never reached index (failure), we store 0.0 or handle it.
             mission_times[r_name] = recorded_mission_time
 
             self.st_hash.add_dense_trajectory(full_robot_traj, self.radius)
-            # Reserve final position permanently
             if full_robot_traj:
                 last = full_robot_traj[-1]
                 self.st_hash.add_permanent_obstacle(last.x, last.y, last.t, self.radius)
             
             final_plans[r_name] = full_robot_traj
-            # Store (x, y, t) for visualization
-            self.debug_paths[r_name] = [(p.x, p.y, p.t) for p in full_robot_traj]
+            local_debug_paths[r_name] = [(p.x, p.y, p.t) for p in full_robot_traj]
             
-            status = "Success" if success else "Partial/Fail"
-            print(f"  > {r_name}: Planned {len(segments)} segments. ({status})")
-
-        # --- Visualization Truncation ---
-        # Only plot up to the moment the last delivery is made.
-        if mission_times:
-            # Find the global mission end time (when the last robot finishes its task)
-            global_mission_end = max(mission_times.values()) if mission_times else 0.0
-            
-            # Filter debug paths to exclude the long "Return to Start" tail after mission end
-            for r_name in self.debug_paths:
-                # Keep points up to global_mission_end + small buffer
-                self.debug_paths[r_name] = [p for p in self.debug_paths[r_name] if p[2] <= global_mission_end + 0.1]
-
-        return final_plans, mission_times
+        return final_plans, mission_times, local_debug_paths, local_debug_waits, failure_count
 
     def _densify_segment(self, coords, spacing=0.5):
         if not coords or len(coords) < 2: return coords

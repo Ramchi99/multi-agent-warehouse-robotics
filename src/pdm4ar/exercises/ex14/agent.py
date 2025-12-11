@@ -112,7 +112,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         self.min_sample_dist = 0.3  # Minimum distance between nodes # 0.3
         self.turn_penalty = 0.0  # Heuristic cost for "stopping and turning" (meters equivalent)
 
-        self.time_limit = 5.0  # Time limit for task allocation # 10.0
+        self.time_limit = 15.0  # Time limit for task allocation # 10.0
 
         self.seed = 42
 
@@ -229,76 +229,29 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         alns_assignments = allocator_alns.solve(time_limit=self.time_limit)
         alns_cost = allocator_alns._evaluate_makespan({r: RobotSchedule(r, t) for r, t in alns_assignments.items()})
 
-        print(f"--- RESULT COMPARISON ---")
+        # --- ALLOCATOR COMPARISON & SELECTION ---
+        print(f"--- RESULT COMPARISON (Theoretical) ---")
         print(f"SA Cost:  {sa_cost:.2f}")
         print(f"LNS Cost: {lns_cost:.2f}")
         print(f"LNS2 Cost: {lns2_cost:.2f}")
         print(f"LNS3 Cost: {lns3_cost:.2f}")
         print(f"ALNS Cost: {alns_cost:.2f}")
 
-        # --- NEW: Call Debug Printer ---
-        # self._print_debug_comparison(sa_assignments, alns_assignments, cost_matrix, heading_matrix)
-        # -------------------------------
-
-        # Pick the winner
-        if alns_cost <= sa_cost and alns_cost <= lns_cost and alns_cost <= lns2_cost and alns_cost <= lns3_cost:
-            print(">> Using ALNS Plan")
-            assignments = alns_assignments
-        elif lns3_cost <= sa_cost and lns3_cost <= lns_cost and lns3_cost <= lns2_cost:
-            print(">> Using LNS3 Plan")
-            assignments = lns3_assignments
-        elif lns2_cost <= sa_cost and lns2_cost <= lns_cost:
-            print(">> Using LNS2 Plan")
-            assignments = lns2_assignments
-        elif lns_cost <= sa_cost:
-            print(">> Using LNS Plan")
-            assignments = lns_assignments
-        else:
-            print(">> Using SA Plan")
-            assignments = sa_assignments
-
-        # --- AUTO-RETURN TO START ---
-        # Prevents deadlocks by clearing collection points
-        for r_name in assignments:
-            # Task: Go to 'r_name' (Start Node) and stay there
-            return_task = DeliveryTask(goal_id=r_name, collection_id=r_name)
-            assignments[r_name].append(return_task)
-
-        # --- 8. CONSTRUCT FINAL PATHS ---
-        final_planned_paths = {}
-        for r_name, tasks in assignments.items():
-            full_coords = []
-            current_node = r_name
-
-            for task in tasks:
-                # 1. Path: Current -> Goal
-                seg1 = self._find_path_coords(path_data, current_node, task.goal_id)
-                # 2. Path: Goal -> Collection
-                seg2 = self._find_path_coords(path_data, task.goal_id, task.collection_id)
-
-                if seg1:
-                    full_coords.extend(seg1)
-                if seg2:
-                    full_coords.extend(seg2)
-
-                current_node = task.collection_id
-
-            final_planned_paths[r_name] = full_coords
-
-        # --- 9. DEBUG PLOT ---
-        out_dir = Path("out/ex14/debug_plots")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = out_dir / f"prm_debug_{timestamp}.png"
-
-        self._plot_prm(G, obs_polygons, special_nodes_plot, str(filename), bounds, path_data, final_planned_paths)
+        # Candidates to evaluate
+        candidates = [
+            ("SA", sa_assignments, sa_cost),
+            ("LNS", lns_assignments, lns_cost),
+            ("LNS2", lns2_assignments, lns2_cost),
+            ("LNS3", lns3_assignments, lns3_cost),
+            ("ALNS", alns_assignments, alns_cost)
+        ]
 
         # ---------------------------------------------------------------------
-        # --- 10. NEW: SPACE-TIME EXECUTION PLANNING (LOGIC INSERTION) ---
+        # --- 10. SPACE-TIME EXECUTION PLANNING (SIMULATION) ---
         # ---------------------------------------------------------------------
-        print(">> Running Space-Time Execution Planning...")
+        print("\n>> Running Space-Time Simulation for ALL candidates...")
         
-        # A. Setup Planner
+        # A. Setup Planner (Shared)
         v_max, w_max = self._get_kinematic_limits(sg, sp)
         
         st_planner = SpaceTimeRoadmapPlanner(
@@ -306,8 +259,8 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             robot_radius=self.robot_radius,
             v_max=v_max, 
             w_max=w_max,
-            dt_search=0.1, # High precision time steps
-            use_prm=False # Tunnel-Path Only Mode (Saves RAM)
+            dt_search=0.1, # High precision
+            use_prm=False # Tunnel-Path Only
         )
         
         # B. Prepare States
@@ -316,54 +269,73 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             for name, s in init_sim_obs.initial_states.items()
         }
         
-        # C. Run Planning
-        # The planner handles the stitching internally for its own use
-        timed_plans, mission_times = st_planner.plan_prioritized(
-            assignments=assignments,
-            path_data=path_data,
-            initial_states=initial_poses
-        )
+        best_candidate_name = None
+        best_score = (float('inf'), float('inf')) # (Failures, Makespan)
+        best_timed_plans = None
+        plot_data = {}
         
-        # D. Plot Execution (The Bubble Plot)
-        filename_exec = out_dir / f"spacetime_exec_{timestamp}.png"
-        st_planner.plot_execution(
-            filename=str(filename_exec),
-            obstacles=obs_polygons,
-            special_nodes=special_nodes_plot
-        )
+        print(f"{'Allocator':<10} | {'Theor. Cost':<12} | {'Failures':<10} | {'Sim. Makespan':<15}")
+        print("-" * 60)
 
-        # ---------------------------------------------------------------------
-        # --- 11. RETURN FINAL PLAN ---
-        # ---------------------------------------------------------------------
-        # We return the TIMED plans because they are safer/better, 
-        # but the logic flow above remained valid.
+        for name, assign, theor_cost in candidates:
+            # Clone assignment to avoid side effects (adding return tasks)
+            sim_assign = copy.deepcopy(assign)
+            for r_name in sim_assign:
+                return_task = DeliveryTask(goal_id=r_name, collection_id=r_name)
+                sim_assign[r_name].append(return_task)
+            
+            # Run Planning
+            timed_plans, mission_times, failure_count = st_planner.plan_prioritized(
+                assignments=sim_assign,
+                path_data=path_data,
+                initial_states=initial_poses
+            )
+            
+            # Store Visualization Data
+            plot_data[name] = (copy.deepcopy(st_planner.debug_paths), copy.deepcopy(st_planner.debug_waits))
+            
+            # Calculate Simulated Makespan
+            sim_makespan = 0.0
+            if mission_times:
+                sim_makespan = max(mission_times.values())
+                
+            print(f"{name:<10} | {theor_cost:<12.2f} | {failure_count:<10} | {sim_makespan:<15.2f}")
+            
+            current_score = (failure_count, sim_makespan)
+            if current_score < best_score:
+                best_score = current_score
+                best_candidate_name = name
+                best_timed_plans = timed_plans
+
+        print(f"\n>>> WINNER: {best_candidate_name} (Failures: {best_score[0]}, Makespan: {best_score[1]:.2f}s) <<<\n")
+
+        # --- PLOTTING SETUP ---
+        out_dir = Path("out/ex14/debug_plots")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # --- 11. PLOT WINNER ---
+        for name, (d_paths, d_waits) in plot_data.items():
+            st_planner.debug_paths = d_paths
+            st_planner.debug_waits = d_waits
+            
+            filename_exec = out_dir / f"spacetime_exec_{timestamp}_{name}.png"
+            st_planner.plot_execution(
+                filename=str(filename_exec),
+                obstacles=obs_polygons,
+                special_nodes=special_nodes_plot
+            )
+
+        # --- 12. RETURN FINAL PLAN (Winner) ---
+        paths_output_xy = {}
+        for r_name, points in best_timed_plans.items():
+            if points:
+                paths_output_xy[r_name] = [(p.x, p.y) for p in points]
+            else:
+                paths_output_xy[r_name] = []
         
-        paths_output = {}
-        for r_name, points in timed_plans.items():
-            # Extract (x, y, theta, t)
-            paths_output[r_name] = [(p.x, p.y, p.theta, p.t) for p in points]
-        
-        # Fallback: if st_planner returned empty for a robot (deadlock), 
-        # we can fallback to the old geometric path (untimed) if you wish,
-        # but usually better to wait. The st_planner returns dummy waits on fail, 
-        # so this is safe.
-
-        # global_plan_message = GlobalPlanMessage(
-        #     paths=paths_output
-        # )
-        # return global_plan_message.model_dump_json(round_trip=True)
-
-        # --- Debug: Final Makespan (Mission Only) ---
-        max_makespan = 0.0
-        if mission_times:
-            max_makespan = max(mission_times.values())
-        print(f"\n>>> FINAL PLAN MAKESPAN: {max_makespan:.2f}s <<<\n")
-
-        # --- 12. RETURN EMPTY PLANS ---
-        planned_paths = {p: [] for p in init_sim_obs.players_obs.keys()}
         global_plan_message = GlobalPlanMessage(
-            # paths=final_planned_paths
-            paths=planned_paths
+            paths=paths_output_xy
         )
         return global_plan_message.model_dump_json(round_trip=True)
 
