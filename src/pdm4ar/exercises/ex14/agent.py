@@ -17,7 +17,7 @@ from scipy.stats.qmc import Halton
 
 # --- [NEW] Added for efficiency ---
 from scipy.spatial import cKDTree  # For fast neighbor search
-from shapely.strtree import STRtree # For fast collision detection
+from shapely.strtree import STRtree  # For fast collision detection
 
 # ----------------------------------
 
@@ -31,7 +31,15 @@ from dg_commons.sim.models.obstacles import StaticObstacle
 from numpydantic import NDArray
 from pydantic import BaseModel
 
-from .task_allocator import DeliveryTask, RobotSchedule, TaskAllocatorSA, TaskAllocatorLNS, TaskAllocatorLNS2, TaskAllocatorLNS3, TaskAllocatorALNS
+from .task_allocator import (
+    DeliveryTask,
+    RobotSchedule,
+    TaskAllocatorSA,
+    TaskAllocatorLNS,
+    TaskAllocatorLNS2,
+    TaskAllocatorLNS3,
+    TaskAllocatorALNS,
+)
 from .spacetime_planner import SpaceTimeRoadmapPlanner
 
 
@@ -180,7 +188,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         sg = DiffDriveGeometry.default()
         sp = DiffDriveParameters.default()
         _, w_max = self._get_kinematic_limits(sg, sp)
-        
+
         # --- Create STRtree for Smoothing ---
         obstacle_tree = STRtree(inflated_obstacles)
 
@@ -199,12 +207,12 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             "goals": goals_list,
             "collections": collections_list,
         }
-        
+
         # Setup Output
         out_dir = Path("out/ex14/debug_plots")
         out_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # A. Run SA
         allocator_sa = TaskAllocatorSA(**alloc_args)
         sa_assignments, sa_hist = allocator_sa.solve(time_limit=self.time_limit)
@@ -227,15 +235,16 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
 
         # E. Run ALNS (Adaptive)
         allocator_alns = TaskAllocatorALNS(**alloc_args)
-        alns_assignments, alns_telemetry = allocator_alns.solve(time_limit=self.time_limit)
+        alns_assignments, alns_telemetry, alns_top_k = allocator_alns.solve(time_limit=self.time_limit)
         alns_cost = allocator_alns._evaluate_makespan({r: RobotSchedule(r, t) for r, t in alns_assignments.items()})
-        
+
         # Telemetry Processing
-        alns_hist = [(entry['time'], entry['best_cost']) for entry in alns_telemetry]
-        
+        alns_hist = [(entry["time"], entry["best_cost"]) for entry in alns_telemetry]
+
         import json
+
         telemetry_file = out_dir / f"alns_telemetry_{timestamp}.json"
-        with open(telemetry_file, 'w') as f:
+        with open(telemetry_file, "w") as f:
             json.dump(alns_telemetry, f, indent=2)
 
         # --- ALLOCATOR COMPARISON & SELECTION ---
@@ -252,37 +261,38 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             ("LNS", lns_assignments, lns_cost),
             ("LNS2", lns2_assignments, lns2_cost),
             ("LNS3", lns3_assignments, lns3_cost),
-            ("ALNS", alns_assignments, alns_cost)
         ]
+        
+        # Add Top K ALNS candidates
+        for i, sol in enumerate(alns_top_k):
+            cost = allocator_alns._evaluate_makespan({r: RobotSchedule(r, t) for r, t in sol.items()})
+            candidates.append((f"ALNS_{i+1}", sol, cost))
 
         # ---------------------------------------------------------------------
         # --- 10. SPACE-TIME EXECUTION PLANNING (SIMULATION) ---
         # ---------------------------------------------------------------------
         print("\n>> Running Space-Time Simulation for ALL candidates...")
-        
+
         # A. Setup Planner (Shared)
         v_max, w_max = self._get_kinematic_limits(sg, sp)
-        
+
         st_planner = SpaceTimeRoadmapPlanner(
             prm_graph=G,
             robot_radius=self.robot_radius,
-            v_max=v_max, 
+            v_max=v_max,
             w_max=w_max,
-            dt_search=0.1, # High precision
-            use_prm=False # Tunnel-Path Only
+            dt_search=0.1,  # High precision
+            use_prm=False,  # Tunnel-Path Only
         )
-        
+
         # B. Prepare States
-        initial_poses = {
-            name: (s.x, s.y, s.psi) 
-            for name, s in init_sim_obs.initial_states.items()
-        }
-        
+        initial_poses = {name: (s.x, s.y, s.psi) for name, s in init_sim_obs.initial_states.items()}
+
         best_candidate_name = None
-        best_score = (float('inf'), float('inf')) # (Failures, Makespan)
+        best_score = (float("inf"), float("inf"))  # (Failures, Makespan)
         best_timed_plans = None
         plot_data = {}
-        
+
         print(f"{'Allocator':<10} | {'Theor. Cost':<12} | {'Failures':<10} | {'Sim. Makespan':<15}")
         print("-" * 60)
 
@@ -292,24 +302,22 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             for r_name in sim_assign:
                 return_task = DeliveryTask(goal_id=r_name, collection_id=r_name)
                 sim_assign[r_name].append(return_task)
-            
+
             # Run Planning
             timed_plans, mission_times, failure_count = st_planner.plan_prioritized(
-                assignments=sim_assign,
-                path_data=path_data,
-                initial_states=initial_poses
+                assignments=sim_assign, path_data=path_data, initial_states=initial_poses
             )
-            
+
             # Store Visualization Data
             plot_data[name] = (copy.deepcopy(st_planner.debug_paths), copy.deepcopy(st_planner.debug_waits))
-            
+
             # Calculate Simulated Makespan
             sim_makespan = 0.0
             if mission_times:
                 sim_makespan = max(mission_times.values())
-                
+
             print(f"{name:<10} | {theor_cost:<12.2f} | {failure_count:<10} | {sim_makespan:<15.2f}")
-            
+
             current_score = (failure_count, sim_makespan)
             if current_score < best_score:
                 best_score = current_score
@@ -324,10 +332,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # --- 11. PLOT CONVERGENCE ---
-        histories = {
-            "SA": sa_hist, "LNS": lns_hist, 
-            "LNS2": lns2_hist, "LNS3": lns3_hist, "ALNS": alns_hist
-        }
+        histories = {"SA": sa_hist, "LNS": lns_hist, "LNS2": lns2_hist, "LNS3": lns3_hist, "ALNS": alns_hist}
         conv_filename = out_dir / f"allocator_convergence_{timestamp}.png"
         self._plot_convergence(histories, str(conv_filename))
 
@@ -335,12 +340,10 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         for name, (d_paths, d_waits) in plot_data.items():
             st_planner.debug_paths = d_paths
             st_planner.debug_waits = d_waits
-            
+
             filename_exec = out_dir / f"spacetime_exec_{timestamp}_{name}.png"
             st_planner.plot_execution(
-                filename=str(filename_exec),
-                obstacles=obs_polygons,
-                special_nodes=special_nodes_plot
+                filename=str(filename_exec), obstacles=obs_polygons, special_nodes=special_nodes_plot
             )
 
         # --- 12. RETURN FINAL PLAN (Winner) ---
@@ -350,15 +353,15 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                 paths_output_xy[r_name] = [(p.x, p.y) for p in points]
             else:
                 paths_output_xy[r_name] = []
-        
-        global_plan_message = GlobalPlanMessage(
-            paths=paths_output_xy
-        )
-        
+
+        global_plan_message = GlobalPlanMessage(paths=paths_output_xy)
+
         # --- Plot Winner PRM with Paths ---
         filename_prm = out_dir / f"prm_debug_{timestamp}_{best_candidate_name}.png"
-        self._plot_prm(G, obs_polygons, special_nodes_plot, str(filename_prm), bounds, path_data, final_paths=paths_output_xy)
-        
+        self._plot_prm(
+            G, obs_polygons, special_nodes_plot, str(filename_prm), bounds, path_data, final_paths=paths_output_xy
+        )
+
         return global_plan_message.model_dump_json(round_trip=True)
 
     def _find_path_coords(self, path_data, src, dst):
@@ -369,20 +372,21 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                 raw_coords = cat[src][dst]["coords"]
                 return self._densify_path(raw_coords, step=0.05)
         return []
-    
+
     def _densify_path(self, coords, step=0.1):
         """Injects points into sparse path for controller stability."""
-        if not coords or len(coords) < 2: return coords
+        if not coords or len(coords) < 2:
+            return coords
         new_coords = [coords[0]]
-        for i in range(len(coords)-1):
+        for i in range(len(coords) - 1):
             p1 = np.array(coords[i])
-            p2 = np.array(coords[i+1])
+            p2 = np.array(coords[i + 1])
             dist = np.linalg.norm(p2 - p1)
             if dist > step:
                 num_points = int(dist / step)
                 for j in range(1, num_points + 1):
                     new_coords.append(tuple(p1 + (p2 - p1) * (j / (num_points + 1))))
-            new_coords.append(coords[i+1])
+            new_coords.append(coords[i + 1])
         return new_coords
 
     def _compute_routing_data(self, G, obstacle_tree, inflated_obstacles) -> Tuple[dict, dict]:
@@ -425,7 +429,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                         # 1. Get Shortest Path by DISTANCE (Geometric Path)
                         path_nodes = nx.shortest_path(G, src_idx, tgt_idx, weight="weight")
                         raw_coords = [pos[n] for n in path_nodes]
-                        
+
                         # [NEW] SMOOTH PATH
                         smoothed_coords = self._smooth_path(raw_coords, obstacle_tree, inflated_obstacles)
 
@@ -438,9 +442,15 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                         e_angle = 0.0
                         if len(smoothed_coords) >= 2:
                             # Heading of the first segment
-                            s_angle = math.atan2(smoothed_coords[1][1] - smoothed_coords[0][1], smoothed_coords[1][0] - smoothed_coords[0][0])
+                            s_angle = math.atan2(
+                                smoothed_coords[1][1] - smoothed_coords[0][1],
+                                smoothed_coords[1][0] - smoothed_coords[0][0],
+                            )
                             # Heading of the last segment
-                            e_angle = math.atan2(smoothed_coords[-1][1] - smoothed_coords[-2][1], smoothed_coords[-1][0] - smoothed_coords[-2][0])
+                            e_angle = math.atan2(
+                                smoothed_coords[-1][1] - smoothed_coords[-2][1],
+                                smoothed_coords[-1][0] - smoothed_coords[-2][0],
+                            )
                         # -------------------------------
 
                         candidates.append((duration, tgt_label, smoothed_coords))
@@ -478,24 +488,25 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         Iterate from Start. Try to connect to the furthest possible node in the sequence
         that is visible (collision-free).
         """
-        if len(coords) < 3: return coords
-        
+        if len(coords) < 3:
+            return coords
+
         smoothed = [coords[0]]
         current_idx = 0
-        
+
         while current_idx < len(coords) - 1:
             # Look ahead from end to current+1
             best_next_idx = current_idx + 1
-            
+
             # Check indices from End down to Current+2
             # We want the FURTHEST reachable node
             for check_idx in range(len(coords) - 1, current_idx + 1, -1):
-                
+
                 # Check line segment
                 p1 = coords[current_idx]
                 p2 = coords[check_idx]
                 line = LineString([p1, p2])
-                
+
                 # Fast AABB check
                 possible_obs = obstacle_tree.query(line)
                 is_colliding = False
@@ -503,14 +514,14 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                     if inflated_obstacles[idx].intersects(line):
                         is_colliding = True
                         break
-                
+
                 if not is_colliding:
                     best_next_idx = check_idx
-                    break # Found the furthest one
-            
+                    break  # Found the furthest one
+
             smoothed.append(coords[best_next_idx])
             current_idx = best_next_idx
-            
+
         return smoothed
 
     def _get_kinematic_limits(self, sg: DiffDriveGeometry, sp: DiffDriveParameters) -> Tuple[float, float]:
@@ -882,36 +893,38 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
 
     def _plot_convergence(self, histories, filename):
         plt.figure(figsize=(12, 8))
-        
+
         # Determine global max time to extend plots to the right edge
         global_max_t = 0.0
         for h in histories.values():
-            if h: global_max_t = max(global_max_t, h[-1][0])
+            if h:
+                global_max_t = max(global_max_t, h[-1][0])
         # Add a small buffer or assume time_limit was ~global_max_t
         global_max_t = max(global_max_t, 0.1)
 
         for name, history in histories.items():
-            if not history: continue
+            if not history:
+                continue
             history.sort(key=lambda x: x[0])
-            
+
             times = [t for t, c in history]
             costs = [c for t, c in history]
-            
+
             # Extend the line to the global max time for visual comparison
             if times[-1] < global_max_t:
                 times.append(global_max_t)
                 costs.append(costs[-1])
-            
+
             # Plot
             final_c = costs[-1]
-            plt.step(times, costs, where='post', label=f"{name} ({final_c:.2f})", linewidth=2.5, alpha=0.8)
-            plt.plot(times, costs, 'o', markersize=5, alpha=0.6) # Mark improvements
-            
+            plt.step(times, costs, where="post", label=f"{name} ({final_c:.2f})", linewidth=2.5, alpha=0.8)
+            plt.plot(times, costs, "o", markersize=5, alpha=0.6)  # Mark improvements
+
         plt.xlabel("Computation Time (s)", fontsize=12)
         plt.ylabel("Theoretical Cost", fontsize=12)
         plt.title("Optimization Convergence Profile", fontsize=14)
-        plt.legend(fontsize=10, loc='best')
-        plt.grid(True, which="both", linestyle='--', alpha=0.5)
+        plt.legend(fontsize=10, loc="best")
+        plt.grid(True, which="both", linestyle="--", alpha=0.5)
         plt.minorticks_on()
         plt.tight_layout()
         plt.savefig(filename)

@@ -164,84 +164,85 @@ class TaskAllocatorBase:
         return total_time
     
     def _print_schedule_debug(self, solution: Dict[str, RobotSchedule]):
-        print("\n" + "="*60)
-        print("DEBUG: DETAILED SCHEDULE KINEMATICS (Reverse-Aware)")
-        print("="*60)
+        pass
+        # print("\n" + "="*60)
+        # print("DEBUG: DETAILED SCHEDULE KINEMATICS (Reverse-Aware)")
+        # print("="*60)
         
-        for r_name, sched in solution.items():
-            if not sched.tasks:
-                print(f"[Robot {r_name}] IDLE")
-                continue
+        # for r_name, sched in solution.items():
+        #     if not sched.tasks:
+        #         print(f"[Robot {r_name}] IDLE")
+        #         continue
                 
-            print(f"[Robot {r_name}] {len(sched.tasks)} Tasks")
-            curr_node = r_name
-            curr_heading = self.initial_headings.get(r_name, 0.0)
+        #     print(f"[Robot {r_name}] {len(sched.tasks)} Tasks")
+        #     curr_node = r_name
+        #     curr_heading = self.initial_headings.get(r_name, 0.0)
             
-            total_time = 0.0
+        #     total_time = 0.0
             
-            for i, task in enumerate(sched.tasks):
-                print(f"  Task {i+1}: {curr_node} -> {task.goal_id} -> {task.collection_id}")
+        #     for i, task in enumerate(sched.tasks):
+        #         print(f"  Task {i+1}: {curr_node} -> {task.goal_id} -> {task.collection_id}")
                 
-                # --- Segment 1: To Goal ---
-                d1 = self.matrix.get(curr_node, {}).get(task.goal_id, 0.0)
-                angles_1 = self.heading_matrix.get(curr_node, {}).get(task.goal_id, (0.0, 0.0))
-                target_h = angles_1[0]
+        #         # --- Segment 1: To Goal ---
+        #         d1 = self.matrix.get(curr_node, {}).get(task.goal_id, 0.0)
+        #         angles_1 = self.heading_matrix.get(curr_node, {}).get(task.goal_id, (0.0, 0.0))
+        #         target_h = angles_1[0]
                 
-                # Turn Logic
-                diff = (target_h - curr_heading + math.pi) % (2 * math.pi) - math.pi
-                c_fwd = abs(diff)
-                c_rev = abs(c_fwd - math.pi)
+        #         # Turn Logic
+        #         diff = (target_h - curr_heading + math.pi) % (2 * math.pi) - math.pi
+        #         c_fwd = abs(diff)
+        #         c_rev = abs(c_fwd - math.pi)
                 
-                is_reverse = c_rev < c_fwd
-                turn_rad = c_rev if is_reverse else c_fwd
-                turn_time = turn_rad / self.w_max
+        #         is_reverse = c_rev < c_fwd
+        #         turn_rad = c_rev if is_reverse else c_fwd
+        #         turn_time = turn_rad / self.w_max
                 
-                if is_reverse:
-                    arr_heading = (angles_1[1] + math.pi) % (2 * math.pi) - math.pi
-                    move_type = "REVERSE"
-                else:
-                    arr_heading = angles_1[1]
-                    move_type = "FORWARD"
+        #         if is_reverse:
+        #             arr_heading = (angles_1[1] + math.pi) % (2 * math.pi) - math.pi
+        #             move_type = "REVERSE"
+        #         else:
+        #             arr_heading = angles_1[1]
+        #             move_type = "FORWARD"
                 
-                print(f"    1. To Goal ({task.goal_id}):")
-                print(f"       Start Head: {curr_heading:.2f} | Path Vector: {target_h:.2f}")
-                print(f"       Action: {move_type} | Turn: {turn_rad:.2f} rad ({turn_time:.2f}s)")
-                print(f"       Travel: {d1:.2f}s | Total Seg: {turn_time + d1:.2f}s")
+        #         print(f"    1. To Goal ({task.goal_id}):")
+        #         print(f"       Start Head: {curr_heading:.2f} | Path Vector: {target_h:.2f}")
+        #         print(f"       Action: {move_type} | Turn: {turn_rad:.2f} rad ({turn_time:.2f}s)")
+        #         print(f"       Travel: {d1:.2f}s | Total Seg: {turn_time + d1:.2f}s")
                 
-                total_time += turn_time + d1
-                curr_heading = arr_heading
+        #         total_time += turn_time + d1
+        #         curr_heading = arr_heading
                 
-                # --- Segment 2: To Collection ---
-                d2 = self.matrix.get(task.goal_id, {}).get(task.collection_id, 0.0)
-                angles_2 = self.heading_matrix.get(task.goal_id, {}).get(task.collection_id, (0.0, 0.0))
-                target_h = angles_2[0]
+        #         # --- Segment 2: To Collection ---
+        #         d2 = self.matrix.get(task.goal_id, {}).get(task.collection_id, 0.0)
+        #         angles_2 = self.heading_matrix.get(task.goal_id, {}).get(task.collection_id, (0.0, 0.0))
+        #         target_h = angles_2[0]
                 
-                diff = (target_h - curr_heading + math.pi) % (2 * math.pi) - math.pi
-                c_fwd = abs(diff)
-                c_rev = abs(c_fwd - math.pi)
+        #         diff = (target_h - curr_heading + math.pi) % (2 * math.pi) - math.pi
+        #         c_fwd = abs(diff)
+        #         c_rev = abs(c_fwd - math.pi)
                 
-                is_reverse = c_rev < c_fwd
-                turn_rad = c_rev if is_reverse else c_fwd
-                turn_time = turn_rad / self.w_max
+        #         is_reverse = c_rev < c_fwd
+        #         turn_rad = c_rev if is_reverse else c_fwd
+        #         turn_time = turn_rad / self.w_max
                 
-                if is_reverse:
-                    arr_heading = (angles_2[1] + math.pi) % (2 * math.pi) - math.pi
-                    move_type = "REVERSE"
-                else:
-                    arr_heading = angles_2[1]
-                    move_type = "FORWARD"
+        #         if is_reverse:
+        #             arr_heading = (angles_2[1] + math.pi) % (2 * math.pi) - math.pi
+        #             move_type = "REVERSE"
+        #         else:
+        #             arr_heading = angles_2[1]
+        #             move_type = "FORWARD"
                 
-                print(f"    2. To Coll ({task.collection_id}):")
-                print(f"       Start Head: {curr_heading:.2f} | Path Vector: {target_h:.2f}")
-                print(f"       Action: {move_type} | Turn: {turn_rad:.2f} rad ({turn_time:.2f}s)")
-                print(f"       Travel: {d2:.2f}s | Total Seg: {turn_time + d2:.2f}s")
+        #         print(f"    2. To Coll ({task.collection_id}):")
+        #         print(f"       Start Head: {curr_heading:.2f} | Path Vector: {target_h:.2f}")
+        #         print(f"       Action: {move_type} | Turn: {turn_rad:.2f} rad ({turn_time:.2f}s)")
+        #         print(f"       Travel: {d2:.2f}s | Total Seg: {turn_time + d2:.2f}s")
                 
-                total_time += turn_time + d2
-                curr_heading = arr_heading
+        #         total_time += turn_time + d2
+        #         curr_heading = arr_heading
                 
-                curr_node = task.collection_id
+        #         curr_node = task.collection_id
                 
-            print(f"  >> Total Robot Time: {total_time:.2f}s")
+        #     print(f"  >> Total Robot Time: {total_time:.2f}s")
             
 class TaskAllocatorSA(TaskAllocatorBase):
     """Original Simulated Annealing Implementation"""
@@ -482,6 +483,21 @@ class TaskAllocatorLNS(TaskAllocatorBase):
                 current_sol = temp_sol
 
         print(f"LNS Finished: Best Cost {best_cost:.2f} | Iterations: {iterations} | Evals: {self.eval_count}")
+        
+        # --- Print Optimal Path (User Requested Format) ---
+        print("\n" + "="*60)
+        print("OPTIMAL PATH SUMMARY (LNS)")
+        print("="*60)
+        path_lines = []
+        for r_name in sorted(best_sol.keys()):
+            sched = best_sol[r_name]
+            segments = [f"robot {r_name}"]
+            for task in sched.tasks:
+                segments.append(f"--> goal {task.goal_id} -- collection {task.collection_id}")
+            path_lines.append(" ".join(segments))
+        print(", ".join(path_lines))
+        print("="*60 + "\n")
+
         return {r: sched.tasks for r, sched in best_sol.items()}, self.history
 
     def _optimize_solution_dropoffs(self, solution):
@@ -846,6 +862,21 @@ class TaskAllocatorLNS2(TaskAllocatorLNS):
             temperature *= cooling_rate
 
         print(f"LNS2 Finished: Best Cost {best_cost:.2f} | Iterations: {iterations} | Evals: {self.eval_count}")
+        
+        # --- Print Optimal Path (User Requested Format) ---
+        print("\n" + "="*60)
+        print("OPTIMAL PATH SUMMARY (LNS2)")
+        print("="*60)
+        path_lines = []
+        for r_name in sorted(best_sol.keys()):
+            sched = best_sol[r_name]
+            segments = [f"robot {r_name}"]
+            for task in sched.tasks:
+                segments.append(f"--> goal {task.goal_id} -- collection {task.collection_id}")
+            path_lines.append(" ".join(segments))
+        print(", ".join(path_lines))
+        print("="*60 + "\n")
+
         return {r: sched.tasks for r, sched in best_sol.items()}, self.history
 
     def _intensify_solution(self, solution):
@@ -1168,6 +1199,21 @@ class TaskAllocatorLNS3(TaskAllocatorLNS2):
             temperature *= cooling_rate
 
         print(f"LNS3 Finished: Best Cost {best_cost:.2f} | Iterations: {iterations} | Evals: {self.eval_count}")
+        
+        # --- Print Optimal Path (User Requested Format) ---
+        print("\n" + "="*60)
+        print("OPTIMAL PATH SUMMARY (LNS3)")
+        print("="*60)
+        path_lines = []
+        for r_name in sorted(best_sol.keys()):
+            sched = best_sol[r_name]
+            segments = [f"robot {r_name}"]
+            for task in sched.tasks:
+                segments.append(f"--> goal {task.goal_id} -- collection {task.collection_id}")
+            path_lines.append(" ".join(segments))
+        print(", ".join(path_lines))
+        print("="*60 + "\n")
+
         return {r: sched.tasks for r, sched in best_sol.items()}, self.history
 
     def _destroy_spatial(self, solution, n):
@@ -1243,6 +1289,14 @@ class TaskAllocatorALNS(TaskAllocatorBase):
         
         self.decay = 0.95   # Smoothing factor for weights
         
+    def _get_sol_hash(self, solution):
+        # Canonical string representation for uniqueness check
+        s = []
+        for r in sorted(solution.keys()):
+            tasks = tuple((t.goal_id, t.collection_id) for t in solution[r].tasks)
+            s.append((r, tasks))
+        return tuple(s)
+
     def solve(self, time_limit: float = 2.0) -> Tuple[Dict[str, List[DeliveryTask]], List[Dict[str, Any]]]:
         print(f"--- Running ALNS (Time Limit: {time_limit}s) ---")
         start_time = time.time()
@@ -1260,6 +1314,28 @@ class TaskAllocatorALNS(TaskAllocatorBase):
         current_cost = best_cost
         
         telemetry_log = []
+        
+        # [NEW] Top K Tracking
+        top_k_solutions = [] 
+        seen_hashes = set()
+        
+        def try_add_top_k(sol, cost):
+            h = self._get_sol_hash(sol)
+            if h in seen_hashes: return
+            
+            # Deep Copy for storage
+            sol_copy = {r: sched.clone() for r, sched in sol.items()}
+            
+            top_k_solutions.append((cost, sol_copy))
+            seen_hashes.add(h)
+            
+            # Sort by cost (ascending)
+            top_k_solutions.sort(key=lambda x: x[0])
+            
+            if len(top_k_solutions) > 10:
+                top_k_solutions.pop() # Remove worst
+        
+        try_add_top_k(best_sol, best_cost)
         
         # [IMPROVEMENT] Dynamic Temperature
         temperature = max(50.0, current_cost * 0.5)
@@ -1279,29 +1355,75 @@ class TaskAllocatorALNS(TaskAllocatorBase):
             
         iterations_since_improvement = 0
         force_kick = False # For massive destroy
-        force_nuclear = False # For nuclear destroy
+        consecutive_failed_kicks = 0
         reheat_count = 0
+        
+        # NEW: Unique Solution Tracking (Initialization)
+        best_solutions_count = 1 # Start with 1 for the initial best_sol
+        unique_best_solutions = {self._get_sol_hash(best_sol)}
         
         # ALNS Loop
         while (time.time() - start_time) < time_limit:
             iterations += 1
             
             # [IMPROVEMENT] Variable Neighborhood Size (VND)
-            if force_nuclear:
-                n_remove = int(n_tasks * 0.7) # Nuclear kick
-                force_nuclear = False
+            if force_kick:
+                # 1. ANALYZE CONTEXT (Imbalance)
+                times = [self._calculate_schedule_duration(r, current_sol[r].tasks) for r in self.robots]
+                if not times:
+                    max_dur = 1.0
+                    imbalance = 0.0
+                else:
+                    max_dur = max(times)
+                    imbalance = max(times) - min(times)
+                
+                # Ratio: e.g., 0.15 means imbalance is 15% of the total time
+                ratio = imbalance / max(max_dur, 1e-5)
+
+                # 2. DECIDE KICK STRATEGY
+                # CASE A: Imbalance is TOO HIGH (> 15%) -> Force fix bottleneck
+                if ratio > 0.15:
+                    op_name = 'critical'
+                    n_remove = int(n_tasks * 0.5)
+                    # print(f"  >> CONTEXT KICK: Imbalance High ({ratio:.1%}) -> SNIPER")
+                    
+                # CASE B: Imbalance is TOO LOW (< 5%) -> Force efficiency scramble
+                # (You are over-optimizing balance at the cost of turning efficiency)
+                elif ratio < 0.05:
+                    op_name = 'random'
+                    n_remove = int(n_tasks * 0.5)
+                    # print(f"  >> CONTEXT KICK: Imbalance Low ({ratio:.1%}) -> SCRAMBLE")
+
+                # CASE C: Imbalance is GOOD (Goldilocks) -> Use Cyclic Logic
+                else:
+                    kick_phase = consecutive_failed_kicks % 3
+                    if kick_phase == 0:
+                        # Strategy 1: Standard Random
+                        op_name = 'random'
+                        n_remove = int(n_tasks * 0.5)
+                    elif kick_phase == 1:
+                        # Strategy 2: Nuclear (Deep Escape)
+                        op_name = 'random'
+                        n_remove = int(n_tasks * 0.7)
+                    else:
+                        # Strategy 3: Critical (Just in case)
+                        op_name = 'critical'
+                        n_remove = int(n_tasks * 0.5)
+                    # print(f"  >> CYCLIC KICK: Phase {kick_phase}")
+
                 force_kick = False
-            elif force_kick:
-                n_remove = int(n_tasks * 0.5) # Massive kick
-                force_kick = False
+                
+                # Boost temp: Higher boost for Nuclear or High-Context fixes
+                kick_strength = 0.8 if (op_name == 'random' and n_remove > n_tasks*0.6) else 0.6
+                temperature = max(temperature, start_temp * kick_strength)
+                
             else:
+                # Normal Scalpel Mode
+                op_name = self._select_operator()
+                self.usage_counts[op_name] += 1
                 base_n = 1 + int(iterations_since_improvement / 50)  # was 20!
                 # n_remove = min(max_rem, base_n)
                 n_remove = min(4, 1 + base_n)
-            
-            # A. Select Operator
-            op_name = self._select_operator()
-            self.usage_counts[op_name] += 1
             
             # B. Clone
             temp_sol = {r: sched.clone() for r, sched in current_sol.items()}
@@ -1328,6 +1450,9 @@ class TaskAllocatorALNS(TaskAllocatorBase):
             # F. Evaluate
             new_cost = self._evaluate_makespan(temp_sol)
             
+            # [NEW] Update Top K
+            try_add_top_k(temp_sol, new_cost)
+            
             # G. Acceptance & Scoring
             delta = new_cost - current_cost
             accepted = False
@@ -1336,13 +1461,31 @@ class TaskAllocatorALNS(TaskAllocatorBase):
             
             if delta < 0:
                 accepted = True
-                if new_cost < best_cost:
+                # 1. New Global Best
+                if new_cost < best_cost - 1e-6:
                     outcome_code = 3 # Global Best
                     reward = self.sigma_1
                     best_sol = {r: sched.clone() for r, sched in temp_sol.items()}
                     best_cost = new_cost
                     iterations_since_improvement = 0 
-                    reheat_count = 0 # Reset on success
+                    reheat_count = 0 
+                    consecutive_failed_kicks = 0
+                    
+                    # Reset Unique Count
+                    best_solutions_count = 1
+                    unique_best_solutions = {self._get_sol_hash(best_sol)}
+                
+                # 2. Alternative Optimal
+                elif abs(new_cost - best_cost) < 1e-6:
+                    outcome_code = 2
+                    reward = self.sigma_2
+                    iterations_since_improvement += 1
+                    
+                    sol_hash = self._get_sol_hash(temp_sol)
+                    if sol_hash not in unique_best_solutions:
+                        unique_best_solutions.add(sol_hash)
+                        best_solutions_count += 1
+
                 else:
                     outcome_code = 2 # Improved Local
                     reward = self.sigma_2
@@ -1404,14 +1547,30 @@ class TaskAllocatorALNS(TaskAllocatorBase):
             # if temperature < 0.5: temperature = 0.5 # Keep it simmering
 
         # Print Statistics
-        print(f"ALNS Finished: Best Cost {best_cost:.2f} | Iterations: {iterations}")
+        print(f"ALNS Finished: Best Cost {best_cost:.2f} | Iterations: {iterations} | Unique Optimal Solutions: {best_solutions_count}")
         print(f"Operator Scores: {self.scores}")
         print(f"Operator Usage: {self.usage_counts}")
         
         # [DEBUG] Print Detailed Kinematics
         self._print_schedule_debug(best_sol)
+
+        # --- Print Optimal Path (User Requested Format) ---
+        print("\n" + "="*60)
+        print("OPTIMAL PATH SUMMARY")
+        print("="*60)
+        path_lines = []
+        for r_name in sorted(best_sol.keys()):
+            sched = best_sol[r_name]
+            segments = [f"robot {r_name}"]
+            for task in sched.tasks:
+                segments.append(f"--> goal {task.goal_id} -- collection {task.collection_id}")
+            path_lines.append(" ".join(segments))
+        print(", ".join(path_lines))
+        print("="*60 + "\n")
         
-        return {r: sched.tasks for r, sched in best_sol.items()}, telemetry_log
+        # [NEW] Return Top K (Formatted)
+        top_k_formatted = [{r: sched.tasks for r, sched in sol[1].items()} for sol in top_k_solutions]
+        return {r: sched.tasks for r, sched in best_sol.items()}, telemetry_log, top_k_formatted
 
     def _select_operator(self):
         """Roulette Wheel Selection based on weights."""
