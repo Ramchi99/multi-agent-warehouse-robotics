@@ -12,6 +12,8 @@ from dg_commons.sim.models.diff_drive_structures import DiffDriveGeometry, DiffD
 from dg_commons import apply_SE2_to_shapely_geo
 import numpy as np
 
+from .planner_viz import PlannerDebugger  # [NEW] Visualization
+
 
 def SE2_from_xytheta(xytheta):
     """
@@ -32,16 +34,17 @@ class PlanPoint:
     t: float
     v: float
     w: float
-    # [NEW] Metadata for backtracking (not used in final output, but helpful here)
-    target_idx: int = 0
+    target_idx: int = 0  # Metadata for backtracking
 
 
 class ExactSpaceTimePlanner:
-    def __init__(self, static_obstacles: List[Polygon], dt: float = 0.1):
+    def __init__(self, static_obstacles: List[Polygon], dt: float = 0.1, margin: float = 0.1): # Added margin default
         self.static_obstacles = static_obstacles
         self.dt = dt
         self.decimal_dt = Decimal(str(dt))
+        self.margin = margin
         self.reservations: Dict[int, List[Polygon]] = {}
+        self.debugger = PlannerDebugger() # [NEW] Debugger
 
     def plan_prioritized(
         self,
@@ -57,21 +60,21 @@ class ExactSpaceTimePlanner:
         
         total_start = time.time()
 
-        # Pre-calculate start footprints for ALL robots (Start Protection)
+        # Pre-calculate start footprints 
         start_footprints = {}
         for r_name in robots_sequence:
             s = initial_states[r_name]
             vg = geometries[r_name]
-            # Buffer start footprints slightly (0.1m)
-            footprint_poly = vg.outline_as_polygon.buffer(0.1)
+            footprint_poly = vg.outline_as_polygon.buffer(self.margin) # Consistent margin
             tform = SE2_from_xytheta([s.x, s.y, s.psi])
             start_footprints[r_name] = apply_SE2_to_shapely_geo(footprint_poly, tform)
 
         for i, robot_name in enumerate(robots_sequence):
             print(f"Planning physics execution for {robot_name}...")
             r_start = time.time()
+            self.debugger.start_robot(robot_name) # [NEW] Start logging
 
-            # Define temporary static obstacles (Lower priority robots waiting at start)
+            # Lower priority robots as obstacles (Optional, can be removed to reduce 'Statue' problem)
             lower_priority_robots = robots_sequence[i+1:]
             temp_static_obstacles = [start_footprints[r] for r in lower_priority_robots]
 
@@ -79,15 +82,14 @@ class ExactSpaceTimePlanner:
             model = DiffDriveModel(x0=start_state, vg=geometries[robot_name], vp=params[robot_name])
             targets = waypoints_dict.get(robot_name, [])
 
-            # [CHANGE] Use Backtracking Planner
+            # USE BACKTRACKING PLANNER
             trajectory = self._plan_single_robot_backtracking(model, targets, extra_static_obstacles=temp_static_obstacles)
             final_plans[robot_name] = trajectory
             
             print(f"  -> Planned {robot_name} in {time.time() - r_start:.2f}s")
 
             # Reserve Space-Time
-            # Buffer reservation footprint (0.1m)
-            footprint = model.vg.outline_as_polygon.buffer(0.1)
+            footprint = model.vg.outline_as_polygon.buffer(self.margin)
             
             last_time_idx = 0
             final_poly = None
@@ -95,7 +97,6 @@ class ExactSpaceTimePlanner:
             for pt in trajectory:
                 time_idx = int(round(pt.t / self.dt))
                 last_time_idx = time_idx
-                
                 tform = SE2_from_xytheta([pt.x, pt.y, pt.theta])
                 current_poly = apply_SE2_to_shapely_geo(footprint, tform)
                 final_poly = current_poly
@@ -104,7 +105,7 @@ class ExactSpaceTimePlanner:
                     self.reservations[time_idx] = []
                 self.reservations[time_idx].append(current_poly)
             
-            # Reserve Parking Spot (End Protection)
+            # Parking Reservation
             if final_poly:
                 PARKING_HORIZON_STEPS = 2000 
                 for k in range(1, PARKING_HORIZON_STEPS):
@@ -114,6 +115,10 @@ class ExactSpaceTimePlanner:
                     self.reservations[future_idx].append(final_poly)
 
         print(f"Total Exact Planning Time: {time.time() - total_start:.2f}s")
+        
+        # [NEW] Generate Plots
+        self.debugger.plot_summary(self.static_obstacles)
+        
         return final_plans
 
     def _plan_single_robot_backtracking_refined(self, model: DiffDriveModel, targets: List[Tuple[float, float]], extra_static_obstacles: List[Polygon] = []) -> List[PlanPoint]:
@@ -155,8 +160,10 @@ class ExactSpaceTimePlanner:
 
         while target_idx < len(targets):
             iter_count += 1
+            self.debugger.record_iteration(iter_count, current_time) # [NEW] Log Progress
+
             if iter_count > MAX_ITERS:
-                print("WARNING: Max iterations reached in planner. Breaking.")
+                print(f"WARNING: Max iterations ({MAX_ITERS}) reached for {model}. Stopping.")
                 break
 
             tx, ty = targets[target_idx]
@@ -166,10 +173,8 @@ class ExactSpaceTimePlanner:
             dy = ty - model._state.y
             dist = math.hypot(dx, dy)
 
-            # Check if Target Reached (Greedy check)
-            # If we are close, we consider it reached and look at next target.
-            # IMPORTANT: We only increment if NOT forced waiting.
-            # If we backtrack, target_idx will be restored (see below), so we re-evaluate distance.
+            # Check if Target Reached
+            # Only advance target if we are NOT in a forced wait state
             if dist < 1e-3 and not forced_wait:
                 target_idx += 1
                 continue
@@ -192,6 +197,9 @@ class ExactSpaceTimePlanner:
                 
                 d_psi = (target_psi - model._state.psi + math.pi) % (2 * math.pi) - math.pi
                 
+                # Turn vs Move logic
+                # [Optimization] If distance is huge, allow moving while turning slightly (Bank turn)?
+                # No, stick to Turn-Then-Move for safety in tight spaces.
                 if abs(d_psi) > 1e-4: 
                     max_step_rot = w_max * self.dt
                     if abs(d_psi) <= max_step_rot: cmd_w = d_psi / self.dt
@@ -202,11 +210,13 @@ class ExactSpaceTimePlanner:
                     else: cmd_v_mag = v_max
                     cmd_v = cmd_v_mag * move_dir
             else:
-                # Forced Wait (Backtracked)
-                forced_wait = False
+                # Forced Wait (We backtracked here because moving failed)
+                forced_wait = False # Reset flag for NEXT iteration (unless we fail waiting too)
 
             # --- Predict & Check ---
             cmd = get_cmds_inverse(cmd_v, cmd_w)
+            
+            # Predict Next State
             next_model = DiffDriveModel(x0=model._state, vg=model.vg, vp=model.vp)
             next_model.update(cmd, self.decimal_dt)
             next_poly = next_model.get_footprint()
@@ -217,22 +227,23 @@ class ExactSpaceTimePlanner:
                 model.update(cmd, self.decimal_dt)
                 current_time += self.dt
                 s = model._state
-                # Store current target_idx so we can restore it if we pop this state
                 trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, cmd_v, cmd_w, target_idx))
             else:
                 # UNSAFE
-                # 1. Try Wait (only if we weren't already waiting)
-                
-                # Check if we were already trying to wait:
-                # If cmd_v and cmd_w are 0, we were trying to wait.
+                self.debugger.record_collision(next_poly.centroid.x, next_poly.centroid.y) # [NEW] Log Collision
+
+                # 1. Check if we were already waiting.
+                # If cmd was (0,0), it means we tried to wait and failed.
                 already_waiting = (abs(cmd_v) < 1e-6 and abs(cmd_w) < 1e-6)
                 
                 wait_success = False
                 
+                # 2. If we were moving, TRY WAITING first (Greedy fallback)
                 if not already_waiting:
                     wait_model = DiffDriveModel(x0=model._state, vg=model.vg, vp=model.vp)
                     wait_model.update(DiffDriveCommands(0,0), self.decimal_dt)
                     wait_poly = wait_model.get_footprint()
+                    
                     if is_safe(wait_poly, next_time_idx):
                         # Wait Successful
                         model.update(DiffDriveCommands(0,0), self.decimal_dt)
@@ -262,7 +273,6 @@ class ExactSpaceTimePlanner:
                     
                     if not was_wait:
                         # We popped a MOVE. We can now try to REPLACE this Move with a Wait.
-                        
                         # Restore Model State to the parent of the popped state
                         if len(trajectory) > 0:
                             restore_pt = trajectory[-1]
@@ -275,6 +285,7 @@ class ExactSpaceTimePlanner:
                             current_time = 0.0
                             target_idx = 0 
                         
+                        self.debugger.record_backtrack(iter_count, prev_pt.t, current_time) # [NEW] Log Backtrack
                         forced_wait = True
                         break # Done backtracking
                     
