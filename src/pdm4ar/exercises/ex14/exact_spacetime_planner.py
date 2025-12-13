@@ -164,7 +164,7 @@ class ExactSpaceTimePlanner:
             return True
         
         # [NEW] Lookahead Safety Check
-        def is_safe_horizon(next_poly, start_time_idx, steps=15):
+        def is_safe_horizon(next_poly, start_time_idx, steps=50):
             # Check future time steps for DYNAMIC obstacles (reservations) only.
             # Static obstacles are already checked in is_safe().
             for k in range(1, steps + 1):
@@ -178,13 +178,29 @@ class ExactSpaceTimePlanner:
         # --- Main Loop: Process every waypoint ---
         for tx, ty in targets:
 
+            # [NEW] Determine Direction (Forward vs Backward)
+            dx = tx - model._state.x
+            dy = ty - model._state.y
+            
+            # Calculate heading for Forward motion
+            heading_fwd = math.atan2(dy, dx)
+            err_fwd = (heading_fwd - model._state.psi + math.pi) % (2 * math.pi) - math.pi
+            
+            # Calculate heading for Backward motion (facing opposite to target)
+            heading_rev = math.atan2(-dy, -dx)
+            err_rev = (heading_rev - model._state.psi + math.pi) % (2 * math.pi) - math.pi
+            
+            move_dir = 1.0
+            target_psi = heading_fwd
+            
+            # If turning to reverse is shorter (e.g. error is < 90 deg when facing back, but > 90 deg when facing fwd)
+            if abs(err_rev) < abs(err_fwd):
+                move_dir = -1.0
+                target_psi = heading_rev
+
             # === PHASE 1: ALIGN (Spot Turn) ===
             while True:
-                dx = tx - model._state.x
-                dy = ty - model._state.y
-                target_psi = math.atan2(dy, dx)
-
-                # Calculate shortest rotation
+                # Re-calculate error to the CHOSEN target heading
                 d_psi = (target_psi - model._state.psi + math.pi) % (2 * math.pi) - math.pi
 
                 # Tolerance check (Stop turning if close enough)
@@ -250,9 +266,12 @@ class ExactSpaceTimePlanner:
 
                 # If close, use exact speed. Else max speed.
                 if dist <= max_step_dist:
-                    cmd_v = dist / self.dt
+                    cmd_v_mag = dist / self.dt
                 else:
-                    cmd_v = v_max
+                    cmd_v_mag = v_max
+                
+                # [NEW] Apply direction
+                cmd_v = cmd_v_mag * move_dir
 
                 cmd = get_cmds_inverse(v_des=cmd_v, w_des=0.0)
 
