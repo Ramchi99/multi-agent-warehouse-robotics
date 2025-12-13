@@ -59,8 +59,26 @@ class ExactSpaceTimePlanner:
         final_plans = {}
         self.reservations.clear()
 
-        for robot_name in robots_sequence:
+        # [NEW] Pre-calculate start footprints for ALL robots
+        start_footprints = {}
+        for r_name in robots_sequence:
+            s = initial_states[r_name]
+            vg = geometries[r_name]
+            # [MODIFIED] Add safety margin
+            footprint_poly = vg.outline_as_polygon.buffer(0.1)
+            tform = SE2_from_xytheta([s.x, s.y, s.psi])
+            start_footprints[r_name] = apply_SE2_to_shapely_geo(footprint_poly, tform)
+
+        for i, robot_name in enumerate(robots_sequence):
             print(f"Planning physics execution for {robot_name}...")
+
+            # [NEW] Identify lower-priority robots (those coming AFTER me in the sequence)
+            # We treat their START positions as static obstacles to avoid "bulldozing" them.
+            lower_priority_robots = robots_sequence[i+1:]
+            
+            temp_static_obstacles = []
+            for other_r in lower_priority_robots:
+                temp_static_obstacles.append(start_footprints[other_r])
 
             # 1. Initialize the simulation model for this robot
             start_state = initial_states[robot_name]
@@ -70,26 +88,43 @@ class ExactSpaceTimePlanner:
             targets = waypoints_dict.get(robot_name, [])
 
             # 3. Run the "Turn-Move" simulation
-            trajectory = self._plan_single_robot(model, targets)
+            # [MODIFIED] Pass the temporary static obstacles
+            trajectory = self._plan_single_robot(model, targets, extra_static_obstacles=temp_static_obstacles)
             final_plans[robot_name] = trajectory
 
             # 4. Reserve the space-time for this robot so subsequent robots avoid it
-            footprint = model.vg.outline_as_polygon
+            # [MODIFIED] Add safety margin to the reservation footprint
+            footprint = model.vg.outline_as_polygon.buffer(0.1)
+
+            last_time_idx = 0
+            final_poly = None
 
             for pt in trajectory:
                 time_idx = int(round(pt.t / self.dt))
+                last_time_idx = time_idx
 
                 # Create the polygon at this specific time step
                 tform = SE2_from_xytheta([pt.x, pt.y, pt.theta])
                 current_poly = apply_SE2_to_shapely_geo(footprint, tform)
+                final_poly = current_poly
 
                 if time_idx not in self.reservations:
                     self.reservations[time_idx] = []
                 self.reservations[time_idx].append(current_poly)
+            
+            # [NEW] Reserve the "Parked" state for the future
+            # This prevents subsequent robots from colliding with this robot after it finishes.
+            if final_poly:
+                PARKING_HORIZON_STEPS = 1000  # Reserve for 100 seconds after finish
+                for k in range(1, PARKING_HORIZON_STEPS):
+                    future_idx = last_time_idx + k
+                    if future_idx not in self.reservations:
+                        self.reservations[future_idx] = []
+                    self.reservations[future_idx].append(final_poly)
 
         return final_plans
 
-    def _plan_single_robot(self, model: DiffDriveModel, targets: List[Tuple[float, float]]) -> List[PlanPoint]:
+    def _plan_single_robot(self, model: DiffDriveModel, targets: List[Tuple[float, float]], extra_static_obstacles: List[Polygon] = []) -> List[PlanPoint]:
 
         trajectory: List[PlanPoint] = []
         current_time = 0.0
@@ -111,15 +146,33 @@ class ExactSpaceTimePlanner:
 
         # Helper: Check if a future polygon collides
         def is_safe(next_poly, time_idx):
-            # 1. Check Static Obstacles
+            # 1. Check PERMANENT Static Obstacles (Walls)
             for obs in self.static_obstacles:
                 if obs.intersects(next_poly):
                     return False
-            # 2. Check Higher Priority Robots (Space-Time)
+            
+            # 2. Check TEMPORARY Static Obstacles (Unplanned Robots)
+            for obs in extra_static_obstacles:
+                if obs.intersects(next_poly):
+                    return False
+
+            # 3. Check Higher Priority Robots (Space-Time)
             if time_idx in self.reservations:
                 for reserved_poly in self.reservations[time_idx]:
                     if reserved_poly.intersects(next_poly):
                         return False
+            return True
+        
+        # [NEW] Lookahead Safety Check
+        def is_safe_horizon(next_poly, start_time_idx, steps=15):
+            # Check future time steps for DYNAMIC obstacles (reservations) only.
+            # Static obstacles are already checked in is_safe().
+            for k in range(1, steps + 1):
+                check_time = start_time_idx + k
+                if check_time in self.reservations:
+                    for reserved_poly in self.reservations[check_time]:
+                        if reserved_poly.intersects(next_poly):
+                            return False
             return True
 
         # --- Main Loop: Process every waypoint ---
@@ -157,7 +210,8 @@ class ExactSpaceTimePlanner:
                 next_poly = next_model.get_footprint()
                 next_time_idx = int(round((current_time + self.dt) / self.dt))
 
-                if is_safe(next_poly, next_time_idx):
+                # [MODIFIED] Check Immediate Safety AND Future Safety (Lookahead)
+                if is_safe(next_poly, next_time_idx) and is_safe_horizon(next_poly, next_time_idx, steps=50):
                     # EXECUTE: Apply to real model
                     model.update(cmd, self.decimal_dt)
                     current_time += self.dt
@@ -165,11 +219,21 @@ class ExactSpaceTimePlanner:
                     # Store the command used to get HERE
                     trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, cmd_w))
                 else:
-                    # WAIT: Collision detected, stay still
-                    model.update(DiffDriveCommands(0, 0), self.decimal_dt)
-                    current_time += self.dt
-                    s = model._state
-                    trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, 0.0))
+                    # WAIT: Collision detected (immediate or future), stay still
+                    # Check if waiting is safe (Immediate check is enough to detect trapping)
+                    wait_poly = model.get_footprint()
+                    if is_safe(wait_poly, next_time_idx):
+                         model.update(DiffDriveCommands(0, 0), self.decimal_dt)
+                         current_time += self.dt
+                         s = model._state
+                         trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, 0.0))
+                    else:
+                         # We are trapped. Print warning but keep waiting (best effort).
+                         # print(f"WARNING: Robot trapped at time {next_time_idx}!")
+                         model.update(DiffDriveCommands(0, 0), self.decimal_dt)
+                         current_time += self.dt
+                         s = model._state
+                         trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, 0.0))
 
             # === PHASE 2: MOVE (Straight Line) ===
             while True:
@@ -198,7 +262,8 @@ class ExactSpaceTimePlanner:
                 next_poly = next_model.get_footprint()
                 next_time_idx = int(round((current_time + self.dt) / self.dt))
 
-                if is_safe(next_poly, next_time_idx):
+                # [MODIFIED] Check Immediate Safety AND Future Safety (Lookahead)
+                if is_safe(next_poly, next_time_idx) and is_safe_horizon(next_poly, next_time_idx, steps=50):
                     # EXECUTE
                     model.update(cmd, self.decimal_dt)
                     current_time += self.dt
@@ -206,9 +271,17 @@ class ExactSpaceTimePlanner:
                     trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, cmd_v, 0.0))
                 else:
                     # WAIT
-                    model.update(DiffDriveCommands(0, 0), self.decimal_dt)
-                    current_time += self.dt
-                    s = model._state
-                    trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, 0.0))
+                    wait_poly = model.get_footprint()
+                    if is_safe(wait_poly, next_time_idx):
+                         model.update(DiffDriveCommands(0, 0), self.decimal_dt)
+                         current_time += self.dt
+                         s = model._state
+                         trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, 0.0))
+                    else:
+                         # print(f"WARNING: Robot trapped at time {next_time_idx}!")
+                         model.update(DiffDriveCommands(0, 0), self.decimal_dt)
+                         current_time += self.dt
+                         s = model._state
+                         trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, 0.0))
 
         return trajectory
