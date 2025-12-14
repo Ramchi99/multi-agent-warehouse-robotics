@@ -124,16 +124,19 @@ class ExactSpaceTimePlanner:
             return True
 
         target_idx = 0
-        forced_wait_steps = 0  # Counter for Wait Substitution
+        forced_wait_steps = 0
         
-        # --- STAGNATION CONFIG ---
+        # --- ADAPTIVE STAGNATION CONFIG ---
         max_reached_time = 0.0
         last_progress_iter = 0
-        STAGNATION_THRESHOLD = 100 #500 
         
-        # This is the "Small but Significant Jump" (e.g., 0.5s or 1.0s)
-        JUMP_SIZE = 10 #10
-
+        # User Setting: Trigger quickly (100 iterations)
+        STAGNATION_THRESHOLD = 100 
+        
+        # Counter for how many times we have stagnated consecutively
+        # (without reaching a new record time)
+        stagnation_counter = 0 
+        
         iter_count = 0
         MAX_ITERS = 50000
 
@@ -146,10 +149,15 @@ class ExactSpaceTimePlanner:
                 print(f"WARNING: Max iterations reached. Stopping.")
                 break
 
-            # 1. Update Progress Tracker
+            # 1. Update Global Progress (The "High Score")
             if current_time > max_reached_time:
                 max_reached_time = current_time
                 last_progress_iter = iter_count
+                
+                # We broke through the deadlock! Reset the severity level.
+                if stagnation_counter > 0:
+                    # print(f"  [Recovered] Broke through barrier after {stagnation_counter} jumps.")
+                    stagnation_counter = 0
             
             # 2. Check for Stagnation
             is_stagnant = (iter_count - last_progress_iter) > STAGNATION_THRESHOLD
@@ -168,11 +176,10 @@ class ExactSpaceTimePlanner:
                 cmd_v, cmd_w = 0.0, 0.0
                 forced_wait_steps -= 1
                 
-                # Check safety (Wait is usually safe, but check anyway)
                 cmd = get_cmds_inverse(0.0, 0.0)
                 next_model = DiffDriveModel(x0=model._state, vg=model.vg, vp=model.vp)
                 next_model.update(cmd, self.decimal_dt)
-                next_poly = next_model.get_footprint() #.buffer(self.margin)
+                next_poly = next_model.get_footprint()
                 next_time_idx = int(round((current_time + self.dt) / self.dt))
                 safe = is_safe(next_poly, next_time_idx)
                 
@@ -187,7 +194,6 @@ class ExactSpaceTimePlanner:
                     target_idx += 1
                     continue
 
-                # Calculate Move
                 heading_fwd = math.atan2(dy, dx)
                 heading_rev = math.atan2(-dy, -dx)
                 err_fwd = (heading_fwd - model._state.psi + math.pi) % (2 * math.pi) - math.pi
@@ -211,11 +217,10 @@ class ExactSpaceTimePlanner:
                     else: cmd_v_mag = v_max
                     cmd_v = cmd_v_mag * move_dir
 
-                # Check Safety of Move
                 cmd = get_cmds_inverse(cmd_v, cmd_w)
                 next_model = DiffDriveModel(x0=model._state, vg=model.vg, vp=model.vp)
                 next_model.update(cmd, self.decimal_dt)
-                next_poly = next_model.get_footprint() #.buffer(self.margin)
+                next_poly = next_model.get_footprint()
                 next_time_idx = int(round((current_time + self.dt) / self.dt))
                 safe = is_safe(next_poly, next_time_idx)
 
@@ -225,11 +230,20 @@ class ExactSpaceTimePlanner:
                 current_time += self.dt
                 s = model._state
                 trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, cmd_v, cmd_w, target_idx))
+                
+                # [VISUALIZATION] Record Waits
+                if iter_count % 5 == 0:
+                    is_waiting = (abs(cmd_v) < 1e-6 and abs(cmd_w) < 1e-6)
+                    if is_waiting:
+                        self.debugger.record_wait(iter_count, current_time)
+                
+                # Note: We do NOT reset last_progress_iter here. 
+                # It is only reset if current_time > max_reached_time.
             else:
                 # FAILURE HANDLING
                 if not is_stagnant:
                     self.debugger.record_collision(next_poly.centroid.x, next_poly.centroid.y)
-                    # If we failed during a Forced Wait, cancel the rest of the block
+                    # Cancel forced wait if we crash while waiting
                     forced_wait_steps = 0 
 
                 # 1. Try One Single Greedy Wait (Only if NOT Stagnant)
@@ -239,7 +253,7 @@ class ExactSpaceTimePlanner:
                     if not already_waiting:
                         wait_model = DiffDriveModel(x0=model._state, vg=model.vg, vp=model.vp)
                         wait_model.update(DiffDriveCommands(0,0), self.decimal_dt)
-                        wait_poly = wait_model.get_footprint() #.buffer(self.margin)
+                        wait_poly = wait_model.get_footprint()
                         wait_time_idx = int(round((current_time + self.dt) / self.dt))
                         
                         if is_safe(wait_poly, wait_time_idx):
@@ -252,35 +266,50 @@ class ExactSpaceTimePlanner:
                 if wait_success:
                     continue
                 
-                # 2. BACKTRACK LOGIC (Jump & Substitute)
+                # 2. BACKTRACK LOGIC
                 
-                # Cannot backtrack from start
+                # Determine Jump Size based on Escalation
+                pop_count = 1
+                
+                if is_stagnant:
+                    stagnation_counter += 1
+                    
+                    # [ESCALATION LOGIC]
+                    if stagnation_counter <= 2:
+                        jump_steps = 5   # Level 1: 0.5s (Try twice)
+                    elif stagnation_counter <= 4:
+                        jump_steps = 10  # Level 2: 1.0s (Try twice)
+                    else:
+                        jump_steps = 20  # Level 3: 2.0s (Panic mode)
+                    
+                    print(f"  [Stagnation L{stagnation_counter}] Jump {jump_steps} steps & Wait.")
+                    self.debugger.record_stagnation(iter_count, current_time)
+                    
+                    pop_count = jump_steps
+                    forced_wait_steps = jump_steps # "Wait Substitution"
+                    
+                    # Reset watchdog
+                    last_progress_iter = iter_count
+                    # We do NOT reset max_reached_time, because we want to know if this jump
+                    # actually helped us beat the previous record.
+
+                # Check if we can actually pop that many
+                if len(trajectory) < pop_count:
+                    pop_count = len(trajectory) # Pop everything if needed
+
+                # Pop Loop
                 if len(trajectory) == 0:
+                    # Cannot backtrack from start
                     model.update(DiffDriveCommands(0,0), self.decimal_dt)
                     current_time += self.dt
                     s = model._state
                     trajectory.append(PlanPoint(s.x, s.y, s.psi, current_time, 0.0, 0.0, target_idx))
                     continue
 
-                pop_count = 1
-                
-                # [KEY LOGIC] If stagnant, we jump back N and force N wait steps
-                if is_stagnant:
-                    print(f"  [STAGNATION] Jump back {JUMP_SIZE} steps & Wait.")
-                    self.debugger.record_stagnation(iter_count, current_time) # [NEW]
-                    pop_count = JUMP_SIZE
-                    forced_wait_steps = JUMP_SIZE # Substitute moves with waits
-                    
-                    # Reset progress tracker to avoid loop
-                    max_reached_time = current_time - (JUMP_SIZE * self.dt)
-                    last_progress_iter = iter_count
-
-                # Pop Logic
                 while len(trajectory) > 0 and pop_count > 0:
                     prev_pt = trajectory.pop()
                     pop_count -= 1
                     
-                    # Cycle Prevention: If we pop a wait, we must keep popping
                     was_wait = (abs(prev_pt.v) < 1e-6 and abs(prev_pt.w) < 1e-6)
                     if was_wait:
                         pop_count += 1 
@@ -295,11 +324,11 @@ class ExactSpaceTimePlanner:
                     current_time = restore_pt.t
                     target_idx = restore_pt.target_idx
                     self.debugger.record_backtrack(iter_count, prev_pt.t, current_time)
-                    if forced_wait_steps == 0: forced_wait_steps = 1 # [FIX] Force wait after backtrack
+                    if forced_wait_steps == 0: forced_wait_steps = 1
                 else:
                     model._state = DiffDriveState(x=initial_state_copy.x, y=initial_state_copy.y, psi=initial_state_copy.psi)
                     current_time = 0.0
                     target_idx = 0 
-                    if forced_wait_steps == 0: forced_wait_steps = 1 # Minimum wait
+                    if forced_wait_steps == 0: forced_wait_steps = 1
 
         return trajectory

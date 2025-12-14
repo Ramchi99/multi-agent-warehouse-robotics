@@ -27,7 +27,8 @@ class PlannerDebugger:
             'backtracks': [],      # (iter, t_before, t_after, x, y)
             'collisions': [],      # (x, y)
             'targets': [],          # Target Index at this iteration
-            'stagnations': []      # (iter, time)
+            'stagnations': [],      # (iter, time)
+            'waits': []            # (iter, time) [NEW]
         }
 
     def record_iteration(self, iter_idx, sim_time, target_idx=0):
@@ -35,6 +36,10 @@ class PlannerDebugger:
         self.logs[self.current_robot]['iterations'].append(int(iter_idx))
         self.logs[self.current_robot]['sim_times'].append(float(sim_time))
         self.logs[self.current_robot]['targets'].append(int(target_idx))
+        
+    def record_wait(self, iter_idx, sim_time):
+        if not self.current_robot: return
+        self.logs[self.current_robot]['waits'].append((int(iter_idx), float(sim_time)))
         
     def record_stagnation(self, iter_idx, sim_time):
         if not self.current_robot: return
@@ -109,6 +114,7 @@ class PlannerDebugger:
             times = data['sim_times']
             targets = data['targets']
             stagnations = data.get('stagnations', [])
+            waits = data.get('waits', [])
             backtracks = data['backtracks']
 
             # --- Primary Axis: Simulation Time ---
@@ -117,6 +123,11 @@ class PlannerDebugger:
             ax1.set_ylabel('Simulation Time (s)', color=color)
             ax1.plot(iters, times, color=color, linewidth=1.0, alpha=0.8, label="Sim Time")
             ax1.tick_params(axis='y', labelcolor=color)
+            
+            # Highlight Waits
+            if waits:
+                w_iters, w_times = zip(*waits)
+                ax1.scatter(w_iters, w_times, color='orange', s=10, marker='.', label="Wait Step", zorder=3)
             
             # Highlight Stagnation Zones
             if stagnations:
