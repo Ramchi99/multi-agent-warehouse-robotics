@@ -67,9 +67,9 @@ class ExactSpaceTimePlanner:
                 print(f"Global Timeout reached before planning {robot_name}. Aborting.")
                 break
                 
-            print(f"Planning physics execution for {robot_name}...")
+            # print(f"Planning physics execution for {robot_name}...")
             r_start = time.time()
-            self.debugger.start_robot(robot_name)
+            # self.debugger.start_robot(robot_name) # [DISABLED] Speed
 
             # [MODIFIED] Lower priority robots are GHOSTS. We do not treat them as static obstacles.
             # They must yield to us.
@@ -88,14 +88,14 @@ class ExactSpaceTimePlanner:
             )
             
             if trajectory is None:
-                print(f"Planning for {robot_name} failed (Timeout/Pruned). Stopping global plan.")
+                # print(f"Planning for {robot_name} failed (Timeout/Pruned). Stopping global plan.")
                 break
                 
             final_plans[robot_name] = trajectory
             
             dur = max(0.0, time.time() - r_start)
-            self.debugger.record_planning_time(dur) # [NEW]
-            print(f"  -> Planned {robot_name} in {dur:.2f}s")
+            # self.debugger.record_planning_time(dur) # [NEW]
+            # print(f"  -> Planned {robot_name} in {dur:.2f}s")
 
             footprint = model.vg.outline_as_polygon.buffer(self.margin)
             last_time_idx = 0
@@ -120,8 +120,8 @@ class ExactSpaceTimePlanner:
                         self.reservations[future_idx] = []
                     self.reservations[future_idx].append(final_poly)
 
-        print(f"Total Exact Planning Time: {time.time() - total_start:.2f}s")
-        self.debugger.plot_summary(self.static_obstacles)
+        # print(f"Total Exact Planning Time: {time.time() - total_start:.2f}s")
+        # self.debugger.plot_summary(self.static_obstacles) # [DISABLED] Speed
         return final_plans
 
     def _plan_single_robot_backtracking(self, model, targets, extra_static_obstacles, deadline=None, pruning_threshold=float('inf')):

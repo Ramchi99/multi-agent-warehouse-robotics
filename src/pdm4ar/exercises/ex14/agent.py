@@ -248,7 +248,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         self.min_sample_dist = 0.3  # Minimum distance between nodes # 0.3
         self.turn_penalty = 0.0  # Heuristic cost for "stopping and turning" (meters equivalent)
 
-        self.time_limit = 5.0  # Time limit for task allocation # 10.0
+        self.time_limit = 10.0  # Time limit for task allocation # 10.0
 
         self.seed = 42
 
@@ -439,7 +439,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         viz_helper = PlannerVisualizer(robot_radius=self.robot_radius)  # [NEW]
 
         for cand_name, cand_assign, cand_theo_cost in top_candidates:
-            print(f"\n   [Evaluating {cand_name}] ...")
+            # print(f"\n   [Evaluating {cand_name}] ...")
 
             # --- A. Prepare Waypoints ---
             robot_waypoints = {}
@@ -526,7 +526,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
             # [MODIFIED] Check if all robots were planned (timeout check)
             if len(plans_6d) != len(cand_assign):
                 is_valid_candidate = False
-                print(f"     [Fail] Incomplete plan (Timeout/Pruned). Got {len(plans_6d)}/{len(cand_assign)} robots.")
+                # print(f"     [Fail] Incomplete plan (Timeout/Pruned). Got {len(plans_6d)}/{len(cand_assign)} robots.")
 
             # 1. Check Task Completion
             for r_name, r_traj in plans_6d.items():
@@ -572,30 +572,30 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
 
                     if it >= exact_planner.MAX_ITERS:
                         is_valid_candidate = False
-                        print(f"     [Fail] Robot {r_name} hit MAX_ITERS ({it})")
+                        # print(f"     [Fail] Robot {r_name} hit MAX_ITERS ({it})")
 
                     total_iterations += it
                     per_robot_times.append(t)
                     per_robot_iters.append(it)
 
             # 3. Record & Print Result (AFTER Validity Update)
-            viz.record_result(
-                cand_name,
-                cand_theo_cost,
-                actual_makespan,
-                plan_dur,
-                total_backtracks,
-                total_collisions,
-                total_iterations,
-                per_robot_times,
-                per_robot_iters,
-                is_valid=is_valid_candidate,
-            )
+            # viz.record_result(
+            #     cand_name,
+            #     cand_theo_cost,
+            #     actual_makespan,
+            #     plan_dur,
+            #     total_backtracks,
+            #     total_collisions,
+            #     total_iterations,
+            #     per_robot_times,
+            #     per_robot_iters,
+            #     is_valid=is_valid_candidate,
+            # )
 
             status_str = "VALID" if is_valid_candidate else "INVALID"
-            print(
-                f"   -> Result {cand_name}: Theo={cand_theo_cost:.2f}s | Actual={actual_makespan:.2f}s | Status={status_str}"
-            )
+            # print(
+            #     f"   -> Result {cand_name}: Theo={cand_theo_cost:.2f}s | Actual={actual_makespan:.2f}s | Status={status_str}"
+            # )
 
             # 4. Update Winner
             if "best_is_valid" not in locals():
@@ -619,7 +619,7 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
                 best_is_valid = is_valid_candidate
 
         # Plot Summary
-        viz.plot_all()
+        # viz.plot_all()
 
         # ---------------------------------------------------------------------
         # --- 4. Finalize Winner ---
@@ -636,15 +636,15 @@ class Pdm4arGlobalPlanner(GlobalPlanner):
         # Plotting
         paths_output_xy_plot = {r: [(p[0], p[1]) for p in traj] for r, traj in paths_output_6d.items()}
         filename_prm = out_dir / f"prm_debug_{timestamp}_{winner_name}.png"
-        viz_helper.plot_prm(
-            G, obs_polygons, special_nodes_plot, str(filename_prm), bounds, path_data, final_paths=paths_output_xy_plot
-        )
-        viz_helper.plot_trajectory_comparison(
-            waypoints_dict=best_waypoints,
-            final_plans_6d=best_final_plans_6d,
-            obstacles=static_obs_polys,
-            filename=str(out_dir / f"traj_debug_{timestamp}.png"),
-        )
+        # viz_helper.plot_prm(
+        #     G, obs_polygons, special_nodes_plot, str(filename_prm), bounds, path_data, final_paths=paths_output_xy_plot
+        # )
+        # viz_helper.plot_trajectory_comparison(
+        #     waypoints_dict=best_waypoints,
+        #     final_plans_6d=best_final_plans_6d,
+        #     obstacles=static_obs_polys,
+        #     filename=str(out_dir / f"traj_debug_{timestamp}.png"),
+        # )
 
         return global_plan_message.model_dump_json(round_trip=True)
 
