@@ -1,0 +1,33 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Exercise14 - Run",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/pdm4ar/main.py",
+            "args": [
+                "--exercise",
+                "14"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "noDebug": true
+        },
+        {
+            "name": "Exercise14 - Debug",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/pdm4ar/main.py",
+            "args": [
+                "--exercise",
+                "14"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
