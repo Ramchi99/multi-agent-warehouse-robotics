@@ -164,25 +164,26 @@ To guarantee the absolute fastest delivery time within the 60-second global plan
 <p align="center"><i><b>Left:</b> The Physics Tournament in action. While ALNS_1 had the best theoretical cost, ALNS_4 proved to be the fastest in actual physics execution (26.6s) because its specific spatial distribution resulted in fewer traffic jams. <br><b>Right:</b> Computational efficiency of the Space-Time Planner. Higher-priority robots (dark blue) plan almost instantly, while lower-priority robots (light blue/orange) require more iterations and backtracking to navigate by the others.</i></p>
 
 ## Setup and Execution
-This project uses [Poetry](https://python-poetry.org/) for dependency management and requires Python >=3.11. Due to the complex dependencies (like `dg-commons` and `cvxpy`), running it inside a Docker/Devcontainer environment is highly recommended.
+Due to the complex academic dependencies required for the physics engine and planners (e.g., `dg-commons`, `cvxpy`, and `casadi`), this project is configured to run flawlessly inside a **VS Code Devcontainer**. This isolates the environment and guarantees it runs regardless of your host operating system.
 
-### Local Installation
-1. Install Poetry if you haven't already:
-```bash
-pip install poetry
-```
-2. Navigate to the project directory and install the dependencies:
-```bash
-poetry install
-```
+### Recommended Installation (Docker + VS Code)
+1. Ensure you have **Docker Desktop** running and **Visual Studio Code** installed with the "Dev Containers" extension.
+2. Clone this repository and open it in VS Code.
+3. VS Code will detect the `.devcontainer` folder and prompt you to **"Reopen in Container"**. Click it. (If it doesn't prompt, press `Ctrl+Shift+P` and type `Dev Containers: Reopen in Container`).
+4. Docker will automatically pull the base image, install all the Poetry dependencies, and configure the Python environment.
 
-### Running the Planner
-You can execute the planner and generate the visual logs using the built-in PDM4AR course CLI script:
+### Running the Code
+Once inside the Devcontainer, you have two simple ways to execute the simulation:
 
+**Option 1: Using the VS Code Debugger (Recommended)**
+* Open the "Run and Debug" panel in VS Code (`Ctrl+Shift+D`).
+* Select the pre-configured **"Exercise14 - Run"** or **"Exercise14 - Debug"** profile and hit play.
+
+**Option 2: Using the Terminal**
+Run the built-in PDM4AR course CLI script directly:
 ```bash
-poetry run pdm4ar-exercise
+poetry run pdm4ar-exercise --exercise 14
 ```
-*(Note: To run specific configurations, you may need to append arguments like `ex14` depending on the course evaluation framework).*
 
 ## Acknowledgements
 This codebase was developed as the final project for the **Planning and Decision Making for Autonomous Robots (PDM4AR)** master's course at **ETH Zurich** (Fall 2025). The simulation environment, physics engine, and base exercise framework were provided by the [IDSC Frazzoli Lab](https://github.com/PDM4AR). You can find the original exercise description and constraints [here](https://pdm4ar.github.io/exercises/14-multiagent_collection.html).
