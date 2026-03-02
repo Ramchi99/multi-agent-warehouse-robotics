@@ -8,7 +8,7 @@ This project tackles a complex Multi-Agent Path Finding (MAPF) and task allocati
 ## Visuals
 | Config 1 | Config 2 | Config 3 |
 | :---: | :---: | :---: |
-| <img src="animation_1.gif" width="300" /> | <img src="animation_2.gif" width="300" /> | <img src="animation_3.gif" width="300" /> |
+| <img src="animation_1.gif" width="100%" /> | <img src="animation_2.gif" width="100%" /> | <img src="animation_3.gif" width="100%" /> |
 
 ## The Problem
 * **Objective:** Efficiently allocate package pickup/drop-off tasks to multiple robots and navigate them through a warehouse without collisions.
