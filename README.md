@@ -8,7 +8,7 @@ This project tackles a complex Multi-Agent Path Finding (MAPF) and task allocati
 ## Visuals
 | Config 1 | Config 2 | Config 3 |
 | :---: | :---: | :---: |
-| <img src="animation_1.gif" style="width: 100%; max-width: 300px;" /> | <img src="animation_2.gif" style="width: 100%; max-width: 300px;" /> | <img src="animation_3.gif" style="width: 100%; max-width: 300px;" /> |
+| <img src="assets/animation_1.gif" style="width: 100%; max-width: 300px;" /> | <img src="assets/animation_2.gif" style="width: 100%; max-width: 300px;" /> | <img src="assets/animation_3.gif" style="width: 100%; max-width: 300px;" /> |
 
 ## The Problem
 * **Objective:** Efficiently allocate package pickup/drop-off tasks to multiple robots and navigate them through a warehouse without collisions.
@@ -45,7 +45,7 @@ After the macroscopic routing was complete, our `_optimize_node_pos` algorithm e
 4. It shifts the waypoint away from the dead center along this bisector by the maximum safe radius $R_{safe}$ (Target Radius - Margin).
 
 <p align="center">
-  <img src="edge_optimization.png" alt="Edge Optimization" width="800"/>
+  <img src="assets/edge_optimization.png" alt="Edge Optimization" width="800"/>
 </p>
 
 *As shown above, the Edge Optimization literally "cuts the corner", allowing the robot to graze the very edge of the target zone before immediately turning towards its next destination. The algorithm also includes an obstacle validity check—if pushing the waypoint outward causes the path to intersect a static obstacle, it uses an asymmetric fallback strategy to slide the point safely along the incoming or outgoing edge instead.*
@@ -59,7 +59,7 @@ Before any routing occurs, we build an optimized PRM. By iteratively sampling, c
 
 | Config 2 | Config 3 |
 | :---: | :---: |
-| <img src="prm_final.png" style="width: 400px; min-width: 0px;" /> | <img src="prm_final_3.png" style="width: 400px; min-width: 0px;" /> |
+| <img src="assets/prm_final.png" style="width: 400px; min-width: 0px;" /> | <img src="assets/prm_final_3.png" style="width: 400px; min-width: 0px;" /> |
 
 <p align="center"><i>The final smoothed PRM graphs. Notice how paths cleanly hug the edges of obstacles to minimize travel distance.</i></p>
 
@@ -69,7 +69,7 @@ The warehouse task assignment is essentially a Multi-Agent Traveling Salesman Pr
 To overcome this, our **Adaptive Large Neighborhood Search (ALNS)** metaheuristic intelligently navigates this massive search space. By dynamically destroying and repairing schedules, it rapidly converges on near-optimal configurations.
 
 <p align="center">
-  <img src="convergence.png" alt="ALNS Convergence" width="600"/>
+  <img src="assets/convergence.png" alt="ALNS Convergence" width="600"/>
 </p>
 <p align="center"><i>A live trace of our ALNS solver minimizing the makespan over a 10-second run. Note how the algorithm plummets through the search space, finding a highly optimal solution in under 2 seconds, effectively neutralizing the combinatorial explosion.</i></p>
 
@@ -77,7 +77,7 @@ Once the graph is built and exact kinematic costs are computed, the ALNS allocat
 
 | Config 2 | Config 3 |
 | :---: | :---: |
-| <img src="task_allocation.png" style="width: 400px; min-width: 0px;" /> | <img src="task_allocation_3.png" style="width: 400px; min-width: 0px;" /> |
+| <img src="assets/task_allocation.png" style="width: 400px; min-width: 0px;" /> | <img src="assets/task_allocation_3.png" style="width: 400px; min-width: 0px;" /> |
 
 <p align="center"><i>A visualization of fully allocated scenarios. The ALNS solver has grouped tasks spatially, ensuring robots do not cross into each other's territories unnecessarily, minimizing bottleneck traffic.</i></p>
 
@@ -145,7 +145,7 @@ def plan_physics(robot, targets, global_reservations):
 
 | Config 2 | Config 3 |
 | :---: | :---: |
-| <img src="spacetime_planner.png" style="width: 400px; min-width: 0px;" /> | <img src="spacetime_planner_3.png" style="width: 400px; min-width: 0px;" /> |
+| <img src="assets/spacetime_planner.png" style="width: 400px; min-width: 0px;" /> | <img src="assets/spacetime_planner_3.png" style="width: 400px; min-width: 0px;" /> |
 
 <p align="center"><i>The Space-Time execution trace. The red circles indicate locations where a robot intelligently chose to "Wait" for a higher-priority robot to pass. If a collision is unavoidable, the robot utilizes Escalating Backtracking to rewind time and wait earlier in its path.</i></p>
 
@@ -159,7 +159,7 @@ To guarantee the absolute fastest delivery time within the 60-second global plan
 
 | Makespan Comparison | Planner Efficiency |
 | :---: | :---: |
-| <img src="makespan.png" style="height: 300px; min-width: 0px;" /> | <img src="efficiency.png" style="height: 300px; min-width: 0px;" /> |
+| <img src="assets/makespan.png" style="height: 300px; min-width: 0px;" /> | <img src="assets/efficiency.png" style="height: 300px; min-width: 0px;" /> |
 
 <p align="center"><i><b>Left:</b> The Physics Tournament in action. While ALNS_1 had the best theoretical cost, ALNS_4 proved to be the fastest in actual physics execution (26.6s) because its specific spatial distribution resulted in fewer traffic jams. <br><b>Right:</b> Computational efficiency of the Space-Time Planner. Higher-priority robots (dark blue) plan almost instantly, while lower-priority robots (light blue/orange) require more iterations and backtracking to navigate by the others.</i></p>
 

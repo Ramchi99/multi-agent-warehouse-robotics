@@ -1,3 +1,7 @@
 * text=auto eol=lf
 *.{cmd,[cC][mM][dD]} text eol=crlf
 *.{bat,[bB][aA][tT]} text eol=crlf
+
+# Ignore generated output directories in GitHub's language statistics
+out/** linguist-generated=true
+out_stats/** linguist-generated=true
